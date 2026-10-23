@@ -1,0 +1,6 @@
+{
+  "name": "V-Green Commissioning Test Report",
+  "description": "Aplikasi formulir dan dokumentasi foto commissioning test report BSS / EV Charger V-Green Indonesia dengan upload/kamera foto dan cetak PDF.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
