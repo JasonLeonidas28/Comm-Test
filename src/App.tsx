@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { CommissioningReport, PhotoItem, PunchlistItem } from './types/report';
-import { createSampleReport, createEmptyReport } from './utils/sampleData';
+import { createSampleReport, createEmptyReport, DEFAULT_VGREEN_LOGO } from './utils/sampleData';
 import { Header } from './components/Header';
 import { GeneralInfoForm } from './components/GeneralInfoForm';
 import { PhotoCard } from './components/PhotoCard';
@@ -26,24 +26,36 @@ import {
   setActiveTenantId,
   applyTenantToReport,
 } from './utils/tenantStorage';
-import { AuthSession, RentalTenant } from './types/rental';
+import { AuthSession, RentalTenant, DEFAULT_TIER_FEATURES } from './types/rental';
 import {
   getAuthSession,
   setAuthSession,
   clearAuthSession,
   getRentalTenants,
   getRentalTenantById,
+  saveRentalTenant,
+  saveRentalTenants,
   incrementTenantReportUsage,
   decrementTenantReportUsage,
   OWNER_DEFAULT_SESSION,
   getDaysRemaining,
 } from './utils/rentalStorage';
+import { getAllTenantsFromFirestore, subscribeToTenants } from './firebase/tenantService';
 import { LoginPage } from './components/LoginPage';
 import { OwnerDashboardPage } from './components/OwnerDashboardPage';
 import { TenantDashboardPage } from './components/TenantDashboardPage';
 import { LoginModal } from './components/LoginModal';
 import { RentalDashboardModal } from './components/RentalDashboardModal';
 import { TenantRentalBanner } from './components/TenantRentalBanner';
+import { DatabaseStatusModal } from './components/DatabaseStatusModal';
+import { User } from 'firebase/auth';
+import { subscribeToAuth, logoutFirebase } from './firebase/authService';
+import {
+  saveReportToFirestore,
+  getAllReportsFromFirestore,
+  deleteReportFromFirestore,
+  subscribeToReports,
+} from './firebase/reportService';
 import {
   FileText,
   BatteryCharging,
@@ -129,27 +141,6 @@ export default function App() {
     return reports[0]?.id || '';
   });
 
-  const currentReport = useMemo(() => {
-    return reports.find((r) => r.id === currentId) || reports[0] || createSampleReport();
-  }, [reports, currentId]);
-
-  // UI state
-  const [activeTab, setActiveTab] = useState<number>(0);
-  const [withWatermark, setWithWatermark] = useState<boolean>(true);
-  const [isPrintView, setIsPrintView] = useState<boolean>(false);
-  const [isDraftsModalOpen, setIsDraftsModalOpen] = useState<boolean>(false);
-  const [isMissingPhotosOpen, setIsMissingPhotosOpen] = useState<boolean>(false);
-  const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
-
-  // Tenant Profile & White-Labeling State (for rental / SaaS mode)
-  const [tenantProfiles, setTenantProfiles] = useState<TenantProfile[]>(() => getTenantProfiles());
-  const [activeTenantId, setActiveTenantIdState] = useState<string>(() => getActiveTenantProfile().id);
-  const [isTenantModalOpen, setIsTenantModalOpen] = useState<boolean>(false);
-
-  const activeTenant = useMemo(() => {
-    return tenantProfiles.find((t) => t.id === activeTenantId) || tenantProfiles[0];
-  }, [tenantProfiles, activeTenantId]);
-
   // Auth & Rental SaaS State
   const [authSession, setAuthSessionState] = useState<AuthSession | null>(() => getAuthSession());
   const [currentView, setCurrentView] = useState<'dashboard' | 'editor' | 'print'>('dashboard');
@@ -164,28 +155,121 @@ export default function App() {
     return undefined;
   }, [authSession, isOwnerDashboardOpen]);
 
+  // Reports strictly filtered/scoped to current tenant (or all for owner)
+  const tenantReports = useMemo(() => {
+    if (authSession?.role === 'tenant' && currentRentalTenant) {
+      return reports.filter((r) => {
+        if (r.tenantId && r.tenantId === currentRentalTenant.id) return true;
+        if (
+          r.generalInfo.installationVendor &&
+          r.generalInfo.installationVendor.toLowerCase().trim() ===
+            currentRentalTenant.companyName.toLowerCase().trim()
+        ) {
+          return true;
+        }
+        return false;
+      });
+    }
+    return reports;
+  }, [reports, authSession, currentRentalTenant]);
+
+  const currentReport = useMemo(() => {
+    if (authSession?.role === 'tenant' && currentRentalTenant) {
+      const match = tenantReports.find((r) => r.id === currentId);
+      if (match) return match;
+      if (tenantReports.length > 0) return tenantReports[0];
+
+      // If tenant has no reports yet, provide an initial draft template pre-filled with THEIR company name
+      const empty = createEmptyReport();
+      return {
+        ...empty,
+        tenantId: currentRentalTenant.id,
+        generalInfo: {
+          ...empty.generalInfo,
+          installationVendor: currentRentalTenant.companyName,
+          picVendorContact: `${currentRentalTenant.picName} (${currentRentalTenant.phone})`,
+          vgreenLogo: DEFAULT_VGREEN_LOGO,
+          vendorLogo: currentRentalTenant.features?.canWhiteLabel ? (currentRentalTenant.logo || '') : '',
+          customer: 'Vgreen Indonesia',
+        },
+        approval: {
+          ...empty.approval,
+          preparedBy: {
+            ...empty.approval.preparedBy,
+            company: currentRentalTenant.companyName,
+            name: currentRentalTenant.picName,
+            designation: 'Commissioning Engineer',
+          },
+        },
+      };
+    }
+    return reports.find((r) => r.id === currentId) || reports[0] || createSampleReport();
+  }, [reports, tenantReports, currentId, authSession, currentRentalTenant]);
+
+  // UI state
+  const [activeTab, setActiveTab] = useState<number>(0);
+  const [withWatermark, setWithWatermark] = useState<boolean>(true);
+  const [isPrintView, setIsPrintView] = useState<boolean>(false);
+  const [isDraftsModalOpen, setIsDraftsModalOpen] = useState<boolean>(false);
+  const [isMissingPhotosOpen, setIsMissingPhotosOpen] = useState<boolean>(false);
+  const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
+
+  // Tenant Profile & White-Labeling State (for rental / SaaS mode)
+  const [tenantProfiles, setTenantProfiles] = useState<TenantProfile[]>(() => getTenantProfiles());
+  const [activeTenantId, setActiveTenantIdState] = useState<string>(() => getActiveTenantProfile().id);
+  const [isTenantModalOpen, setIsTenantModalOpen] = useState<boolean>(false);
+
+  // Synchronize active tenant profile with logged-in rental tenant
+  useEffect(() => {
+    if (currentRentalTenant) {
+      const profiles = getTenantProfiles();
+      let match = profiles.find(
+        (p) =>
+          p.id === currentRentalTenant.id ||
+          p.name.toLowerCase().trim() === currentRentalTenant.companyName.toLowerCase().trim()
+      );
+      if (!match) {
+        match = {
+          id: currentRentalTenant.id,
+          name: currentRentalTenant.companyName,
+          shortCode: currentRentalTenant.shortCode,
+          phone: currentRentalTenant.phone,
+          email: currentRentalTenant.email,
+          address: currentRentalTenant.address,
+          picName: currentRentalTenant.picName,
+          picRole: 'Commissioning Engineer',
+          picPhone: currentRentalTenant.phone,
+          clientName: 'Vgreen Indonesia',
+          clientLogo: DEFAULT_VGREEN_LOGO,
+          reportPrefix: currentRentalTenant.reportPrefix || `${currentRentalTenant.shortCode}-COMM`,
+          brandColor: currentRentalTenant.brandColor || 'emerald',
+          footerText: `Dokumen Resmi Inspeksi Lapangan & Commissioning EV BSS - ${currentRentalTenant.companyName}`,
+          approvalStatement:
+            'Laporan hasil inspeksi dan pengujian commissioning stasiun swap baterai ini dibuat dengan sebenarnya sesuai kondisi fisik dan kelistrikan di lokasi proyek.',
+          isDefault: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        saveTenantProfile(match);
+        setTenantProfiles(getTenantProfiles());
+      }
+      setActiveTenantIdState(match.id);
+    }
+  }, [currentRentalTenant]);
+
+  const activeTenant = useMemo(() => {
+    return tenantProfiles.find((t) => t.id === activeTenantId) || tenantProfiles[0];
+  }, [tenantProfiles, activeTenantId]);
+
   // Handlers for Auth and Rental
   const handleLoginSuccess = (session: AuthSession) => {
     setAuthSession(session);
     setAuthSessionState(session);
     setCurrentView('dashboard');
-
-    if (session.role === 'tenant' && session.tenantId) {
-      const tenant = getRentalTenantById(session.tenantId);
-      if (tenant) {
-        // Sync with activeTenant profile
-        const matchingProfile = tenantProfiles.find(
-          (p) => p.name.toLowerCase() === tenant.companyName.toLowerCase() || p.shortCode === tenant.shortCode
-        );
-        if (matchingProfile) {
-          setActiveTenantIdState(matchingProfile.id);
-          updateCurrentReport((prev) => applyTenantToReport(prev, matchingProfile));
-        }
-      }
-    }
   };
 
   const handleLogout = () => {
+    logoutFirebase().catch(() => {});
     clearAuthSession();
     setAuthSessionState(null);
     setCurrentView('dashboard');
@@ -211,6 +295,105 @@ export default function App() {
     setCurrentView('dashboard');
   };
 
+  // Database Cloud (Firestore) State
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [isDatabaseModalOpen, setIsDatabaseModalOpen] = useState<boolean>(false);
+  const [dbSyncStatus, setDbSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+
+  // Subscribe to Firebase Auth
+  useEffect(() => {
+    const unsub = subscribeToAuth((user) => {
+      setFirebaseUser(user);
+    });
+    return () => unsub();
+  }, []);
+
+  // Sync with Firestore Cloud Database on boot and listen to real-time updates
+  useEffect(() => {
+    let isMounted = true;
+    const initCloudData = async () => {
+      setDbSyncStatus('syncing');
+      try {
+        const cloudReports = await getAllReportsFromFirestore();
+        if (!isMounted) return;
+
+        const deletedIds = getDeletedReportIds();
+        if (cloudReports && cloudReports.length > 0) {
+          const validCloud = cloudReports.filter((r) => !deletedIds.includes(r.id));
+          setReports((prevLocal) => {
+            const merged = new Map<string, CommissioningReport>();
+            validCloud.forEach((r) => merged.set(r.id, r));
+            prevLocal.forEach((r) => {
+              if (!merged.has(r.id) && !deletedIds.includes(r.id)) {
+                merged.set(r.id, r);
+                // Upload local report to Firestore so cloud has it
+                saveReportToFirestore(r, currentRentalTenant?.id).catch(() => {});
+              }
+            });
+            return Array.from(merged.values());
+          });
+          setLastSyncTime(new Date().toISOString());
+          setDbSyncStatus('synced');
+        } else {
+          // Cloud empty: upload local reports to cloud
+          const validLocal = reports.filter((r) => !deletedIds.includes(r.id));
+          for (const r of validLocal) {
+            await saveReportToFirestore(r, currentRentalTenant?.id);
+          }
+          setLastSyncTime(new Date().toISOString());
+          setDbSyncStatus('synced');
+          // Sync tenants from Firestore
+          const cloudTenants = await getAllTenantsFromFirestore();
+          if (cloudTenants && cloudTenants.length > 0) {
+            const localTenants = getRentalTenants();
+            const localIds = new Set(localTenants.map((t) => t.id));
+            let hasNew = false;
+            const merged = [...localTenants];
+            cloudTenants.forEach((ct) => {
+              if (!localIds.has(ct.id)) {
+                merged.push(ct);
+                hasNew = true;
+              }
+            });
+            if (hasNew) {
+              saveRentalTenants(merged);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Initial Firestore sync notice:', err);
+        setDbSyncStatus('idle');
+      }
+    };
+
+    initCloudData();
+
+    // Attach real-time listener to Firestore reports
+    const unsubReports = subscribeToReports(
+      (updatedCloudReports) => {
+        if (!isMounted) return;
+        if (updatedCloudReports && updatedCloudReports.length > 0) {
+          const deletedIds = getDeletedReportIds();
+          const clean = updatedCloudReports.filter((r) => !deletedIds.includes(r.id));
+          if (clean.length > 0) {
+            setReports(clean);
+            setLastSyncTime(new Date().toISOString());
+            setDbSyncStatus('synced');
+          }
+        }
+      },
+      (err) => {
+        console.warn('Real-time listener note:', err);
+      }
+    );
+
+    return () => {
+      isMounted = false;
+      unsubReports();
+    };
+  }, []);
+
   // Modals
   const [liveCameraItem, setLiveCameraItem] = useState<{
     sectionKey: string;
@@ -233,16 +416,21 @@ export default function App() {
     }
   }, [reports, currentId]);
 
-  // Update current report helper
+  // Update current report helper and automatically persist to Firestore Cloud Database
   const updateCurrentReport = (updater: (prev: CommissioningReport) => CommissioningReport) => {
     setReports((prev) =>
       prev.map((r) => {
         if (r.id === currentReport.id) {
           const updated = updater(r);
-          return {
+          const withTimestamp = {
             ...updated,
             updatedAt: new Date().toISOString(),
           };
+          // Persist to Cloud Database Firestore
+          saveReportToFirestore(withTimestamp, currentRentalTenant?.id).catch((err) =>
+            console.warn('Firestore auto-save notice:', err)
+          );
+          return withTimestamp;
         }
         return r;
       })
@@ -393,14 +581,18 @@ export default function App() {
 
   const handleNewReport = () => {
     // Check rental status and quota if logged in as customer
-    if (authSession?.role === 'tenant' && currentRentalTenant) {
+    if (authSession?.role === 'tenant') {
+      if (!currentRentalTenant) {
+        alert('Data akun penyewa tidak ditemukan. Silakan lengkapi pendaftaran profil customer terlebih dahulu.');
+        return;
+      }
       const daysLeft = getDaysRemaining(currentRentalTenant.endDate);
       if (currentRentalTenant.status === 'expired' || daysLeft <= 0) {
-        alert('Masa sewa akun Anda telah habis. Silakan hubungi penjual via WhatsApp untuk memperpanjang masa aktif aplikasi.');
+        alert('Masa sewa akun Anda telah habis. Silakan hubungi admin via WhatsApp untuk memperpanjang masa aktif aplikasi.');
         return;
       }
       if (currentRentalTenant.status === 'suspended') {
-        alert('Akun sewa Anda sedang ditangguhkan. Silakan hubungi admin penjual.');
+        alert('Akun sewa Anda sedang ditangguhkan. Silakan hubungi admin.');
         return;
       }
       if (
@@ -408,7 +600,9 @@ export default function App() {
         currentRentalTenant.reportsUsed >= currentRentalTenant.reportsQuota
       ) {
         alert(
-          `Batas kuota laporan Anda (${currentRentalTenant.reportsQuota} laporan) telah tercapai. Hubungi penjual untuk menambah kuota laporan!`
+          currentRentalTenant.tier === 'trial'
+            ? 'Kuota Free Trial 1 Token Anda telah habis (1/1 laporan). Silakan hubungi admin via WhatsApp untuk upgrade ke paket berbayar.'
+            : `Batas kuota laporan Anda (${currentRentalTenant.reportsQuota} laporan) telah tercapai. Hubungi admin untuk menambah kuota laporan.`
         );
         return;
       }
@@ -416,7 +610,37 @@ export default function App() {
     }
 
     const empty = createEmptyReport();
-    const customized = activeTenant ? applyTenantToReport(empty, activeTenant) : empty;
+    const vendorName = currentRentalTenant?.companyName || activeTenant?.name || '';
+    const picName = currentRentalTenant?.picName || activeTenant?.picName || '';
+    const picPhone = currentRentalTenant?.phone || activeTenant?.picPhone || activeTenant?.phone || '';
+
+    const customized: CommissioningReport = {
+      ...empty,
+      tenantId: currentRentalTenant?.id,
+      generalInfo: {
+        ...empty.generalInfo,
+        installationVendor: vendorName,
+        picVendorContact: picName ? `${picName} (${picPhone})` : '',
+        vgreenLogo: DEFAULT_VGREEN_LOGO,
+        vendorLogo: currentRentalTenant?.features?.canWhiteLabel ? (currentRentalTenant?.logo || '') : '',
+        customer: 'Vgreen Indonesia',
+      },
+      approval: {
+        ...empty.approval,
+        statement: activeTenant?.approvalStatement || empty.approval.statement,
+        preparedBy: {
+          ...empty.approval.preparedBy,
+          company: vendorName,
+          name: picName || empty.approval.preparedBy.name,
+          designation: 'Commissioning Engineer',
+        },
+      },
+    };
+
+    // Persist new report to Firestore Cloud Database
+    saveReportToFirestore(customized, currentRentalTenant?.id).catch((err) =>
+      console.warn('Firestore new report save notice:', err)
+    );
     setReports((prev) => [customized, ...prev]);
     setCurrentId(customized.id);
     setActiveTab(0);
@@ -424,10 +648,18 @@ export default function App() {
 
   const handleCloneReport = () => {
     // Check rental status and quota if logged in as customer
-    if (authSession?.role === 'tenant' && currentRentalTenant) {
+    if (authSession?.role === 'tenant') {
+      if (!currentRentalTenant) {
+        alert('Data akun penyewa tidak ditemukan. Silakan lengkapi pendaftaran profil customer terlebih dahulu.');
+        return;
+      }
       const daysLeft = getDaysRemaining(currentRentalTenant.endDate);
       if (currentRentalTenant.status === 'expired' || daysLeft <= 0) {
-        alert('Masa sewa akun Anda telah habis. Silakan hubungi penjual via WhatsApp untuk memperpanjang masa aktif aplikasi.');
+        alert('Masa sewa akun Anda telah habis. Silakan hubungi admin via WhatsApp untuk memperpanjang masa aktif aplikasi.');
+        return;
+      }
+      if (currentRentalTenant.status === 'suspended') {
+        alert('Akun sewa Anda sedang ditangguhkan. Silakan hubungi admin.');
         return;
       }
       if (
@@ -435,7 +667,9 @@ export default function App() {
         currentRentalTenant.reportsUsed >= currentRentalTenant.reportsQuota
       ) {
         alert(
-          `Batas kuota laporan Anda (${currentRentalTenant.reportsQuota} laporan) telah tercapai. Hubungi penjual untuk menambah kuota laporan!`
+          currentRentalTenant.tier === 'trial'
+            ? 'Kuota Free Trial 1 Token Anda telah habis (1/1 laporan). Silakan hubungi admin via WhatsApp untuk upgrade ke paket berbayar.'
+            : `Batas kuota laporan Anda (${currentRentalTenant.reportsQuota} laporan) telah tercapai. Hubungi admin untuk menambah kuota laporan.`
         );
         return;
       }
@@ -444,26 +678,31 @@ export default function App() {
 
     const newId = `report-${Date.now()}`;
     const baseEmpty = createEmptyReport();
+    const vendorName = currentRentalTenant?.companyName || currentReport.generalInfo.installationVendor || activeTenant?.name || '';
+    const picName = currentRentalTenant?.picName || currentReport.approval.preparedBy.name || '';
+    const picPhone = currentRentalTenant?.phone || '';
+
     const cloned: CommissioningReport = {
       ...baseEmpty,
       id: newId,
+      tenantId: currentRentalTenant?.id,
       title: `Pre-Commissioning Report - Salinan ${currentReport.generalInfo.plantName || ''}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       generalInfo: {
         ...baseEmpty.generalInfo,
-        installationVendor: currentReport.generalInfo.installationVendor,
-        picVendorContact: currentReport.generalInfo.picVendorContact,
+        installationVendor: vendorName,
+        picVendorContact: picName ? `${picName} (${picPhone})` : currentReport.generalInfo.picVendorContact,
         vgreenLogo: currentReport.generalInfo.vgreenLogo,
-        vendorLogo: currentReport.generalInfo.vendorLogo,
+        vendorLogo: currentRentalTenant?.features?.canWhiteLabel ? (currentReport.generalInfo.vendorLogo || '') : '',
         evChargerType: currentReport.generalInfo.evChargerType,
       },
       approval: {
         ...baseEmpty.approval,
         preparedBy: {
           ...baseEmpty.approval.preparedBy,
-          name: currentReport.approval.preparedBy.name,
-          company: currentReport.approval.preparedBy.company,
+          name: picName || currentReport.approval.preparedBy.name,
+          company: vendorName,
         },
         checkedBy: {
           ...baseEmpty.approval.checkedBy,
@@ -477,6 +716,11 @@ export default function App() {
         },
       },
     };
+
+    // Persist cloned report to Firestore Cloud Database
+    saveReportToFirestore(cloned, currentRentalTenant?.id).catch((err) =>
+      console.warn('Firestore clone report save notice:', err)
+    );
 
     setReports((prev) => [cloned, ...prev]);
     setCurrentId(newId);
@@ -522,7 +766,12 @@ export default function App() {
       decrementTenantReportUsage(currentRentalTenant.id);
     }
 
-    // 3. Update state and storage immediately
+    // 3. Delete from Firestore Cloud Database
+    deleteReportFromFirestore(id).catch((err) =>
+      console.warn('Firestore report deletion notice:', err)
+    );
+
+    // 4. Update state and storage immediately
     setReports((prev) => {
       const remaining = prev.filter((r) => r.id !== id);
       try {
@@ -591,48 +840,50 @@ export default function App() {
           setCurrentView('print');
         }}
         onDeleteReport={handleDeleteReport}
+        onOpenDatabaseModal={() => setIsDatabaseModalOpen(true)}
       />
     );
   }
 
   // 4. Full-page Tenant Customer Dashboard
   if (currentView === 'dashboard' && authSession.role === 'tenant') {
-    const fallbackTenant: RentalTenant = currentRentalTenant || {
-      id: authSession.tenantId || 'tenant-custom',
-      companyName: authSession.tenantName || 'Customer Penyewa Lapangan',
+    const activeTenant: RentalTenant = currentRentalTenant || {
+      id: authSession.tenantId || `tenant-${Date.now()}`,
+      companyName: authSession.tenantName || 'Pelanggan Baru (Free Trial)',
       shortCode: 'BSS',
       email: authSession.userEmail,
-      picName: authSession.userName,
+      picName: authSession.userName || 'Surveyor Lapangan',
       phone: '0812-3456-7890',
       address: 'Indonesia',
-      tier: 'pro',
-      tierName: 'Pro Commissioning',
+      tier: 'trial',
+      tierName: 'Free Trial (1 Token)',
       status: 'active',
-      rentalFeeMonthly: 850000,
+      rentalFeeMonthly: 0,
       paymentStatus: 'paid',
       startDate: new Date().toISOString().split('T')[0],
-      endDate: '2026-11-20',
-      reportsQuota: 20,
-      reportsUsed: reports.length,
-      features: {
-        canExportPdf: true,
-        canWhiteLabel: true,
-        canExportZip: true,
-        canUsePunchlist: true,
-        canUseAuditTools: true,
-        canUseBarcodeScanner: true,
-        canUseGeoLocation: true,
-        allowCustomClientLogo: true,
-      },
+      endDate: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+      reportsQuota: 1, // Free trial strictly 1 Token!
+      reportsUsed: tenantReports.length,
+      features: { ...DEFAULT_TIER_FEATURES.trial.features },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+    };
+
+    // Ensure it is persisted if it wasn't in storage yet
+    if (!currentRentalTenant) {
+      saveRentalTenant(activeTenant);
+    }
+
+    const tenantWithActualCount: RentalTenant = {
+      ...activeTenant,
+      reportsUsed: tenantReports.length,
     };
 
     return (
       <TenantDashboardPage
         session={authSession}
-        tenant={fallbackTenant}
-        reports={reports}
+        tenant={tenantWithActualCount}
+        reports={tenantReports}
         onOpenReportEditor={(reportId) => {
           if (reportId) setCurrentId(reportId);
           setCurrentView('editor');
@@ -642,10 +893,34 @@ export default function App() {
           setCurrentView('print');
         }}
         onNewReport={() => {
+          if (
+            activeTenant.status === 'expired' ||
+            activeTenant.status === 'suspended' ||
+            (activeTenant.reportsQuota !== -1 && activeTenant.reportsUsed >= activeTenant.reportsQuota)
+          ) {
+            alert(
+              activeTenant.tier === 'trial'
+                ? 'Kuota Free Trial 1 Token Anda telah habis (1/1 laporan). Hubungi admin via WhatsApp untuk upgrade ke paket berbayar.'
+                : `Batas kuota laporan Anda (${activeTenant.reportsQuota} laporan) telah tercapai. Hubungi admin untuk menambah kuota laporan.`
+            );
+            return;
+          }
           handleNewReport();
           setCurrentView('editor');
         }}
         onCloneReport={(repId) => {
+          if (
+            activeTenant.status === 'expired' ||
+            activeTenant.status === 'suspended' ||
+            (activeTenant.reportsQuota !== -1 && activeTenant.reportsUsed >= activeTenant.reportsQuota)
+          ) {
+            alert(
+              activeTenant.tier === 'trial'
+                ? 'Kuota Free Trial 1 Token Anda telah habis (1/1 laporan). Hubungi admin via WhatsApp untuk upgrade ke paket berbayar.'
+                : `Batas kuota laporan Anda (${activeTenant.reportsQuota} laporan) telah tercapai. Hubungi admin untuk menambah kuota laporan.`
+            );
+            return;
+          }
           handleCloneReport();
           setCurrentView('editor');
         }}
@@ -677,6 +952,8 @@ export default function App() {
         totalPhotosCount={photoStats.total}
         onOpenTenantProfile={() => setIsTenantModalOpen(true)}
         activeTenantName={currentRentalTenant?.companyName || activeTenant?.name}
+        onOpenDatabaseModal={authSession.role === 'owner' ? () => setIsDatabaseModalOpen(true) : undefined}
+        dbSyncStatus={dbSyncStatus}
         onOpenLogin={() => setIsLoginModalOpen(true)}
         onOpenOwnerDashboard={() => {
           if (authSession.role === 'owner') {
@@ -746,6 +1023,10 @@ export default function App() {
                 }
                 onOpenScanner={(field) => setScannerTargetField(field)}
                 onOpenTenantProfile={() => setIsTenantModalOpen(true)}
+                canWhiteLabel={authSession?.role === 'owner' ? true : (currentRentalTenant?.features.canWhiteLabel ?? true)}
+                allowCustomClientLogo={authSession?.role === 'owner' ? true : (currentRentalTenant?.features.allowCustomClientLogo ?? true)}
+                tierName={currentRentalTenant?.tierName}
+                isOwner={authSession?.role === 'owner'}
               />
             </div>
           )}
@@ -1215,6 +1496,23 @@ export default function App() {
           isOpen={isOwnerDashboardOpen}
           onClose={() => setIsOwnerDashboardOpen(false)}
           onImpersonateTenant={handleImpersonateTenant}
+        />
+      )}
+
+      {/* 10. Database Cloud Firestore Status & Sync Modal (Strictly Restricted to Owner / Admin) */}
+      {authSession.role === 'owner' && (
+        <DatabaseStatusModal
+          isOpen={isDatabaseModalOpen}
+          onClose={() => setIsDatabaseModalOpen(false)}
+          reports={reports}
+          onReportsMerged={(merged) => {
+            setReports(merged);
+            setLastSyncTime(new Date().toISOString());
+            setDbSyncStatus('synced');
+          }}
+          firebaseUser={firebaseUser}
+          syncStatus={dbSyncStatus}
+          lastSyncTime={lastSyncTime}
         />
       )}
     </div>

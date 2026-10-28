@@ -1,0 +1,170 @@
+{
+  "entities": {
+    "Report": {
+      "title": "CommissioningReport",
+      "description": "Pre-commissioning test report for EV Charger and Battery Swap Stations (BSS)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the commissioning report",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Display title or station code of the report",
+          "maxLength": 256
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp when the report was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when the report was last updated"
+        },
+        "tenantId": {
+          "type": "string",
+          "description": "ID of the rental contractor tenant who created the report",
+          "maxLength": 128
+        },
+        "creatorUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the creator user",
+          "maxLength": 128
+        },
+        "creatorEmail": {
+          "type": "string",
+          "description": "Email of the creator user",
+          "maxLength": 256
+        },
+        "status": {
+          "type": "string",
+          "description": "Workflow status of the report",
+          "enum": ["draft", "submitted", "approved", "completed"]
+        },
+        "generalInfo": {
+          "type": "object",
+          "description": "General plant metadata, charger SN, billing ID, coordinates, and vendor details"
+        },
+        "approval": {
+          "type": "object",
+          "description": "Signatures and verification stamps"
+        }
+      },
+      "required": ["id", "title", "createdAt", "updatedAt"]
+    },
+    "ReportPhoto": {
+      "title": "ReportPhoto",
+      "description": "Individual photo proof and measurement item associated with a report",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Photo item identifier",
+          "maxLength": 128
+        },
+        "reportId": {
+          "type": "string",
+          "description": "Parent report ID",
+          "maxLength": 128
+        },
+        "sectionKey": {
+          "type": "string",
+          "description": "Report section identifier",
+          "maxLength": 64
+        },
+        "photoKey": {
+          "type": "string",
+          "description": "Key within section",
+          "maxLength": 64
+        },
+        "label": {
+          "type": "string",
+          "description": "Human readable item title",
+          "maxLength": 256
+        },
+        "imageData": {
+          "type": "string",
+          "description": "Base64 data or image URL"
+        },
+        "measurementValue": {
+          "type": "string",
+          "description": "Multimeter or tester measured value",
+          "maxLength": 64
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Camera capture timestamp",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "reportId", "sectionKey", "photoKey"]
+    },
+    "Tenant": {
+      "title": "RentalTenant",
+      "description": "Contractor tenant profile and subscription package details",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Tenant unique identifier",
+          "maxLength": 128
+        },
+        "companyName": {
+          "type": "string",
+          "description": "Registered company name",
+          "maxLength": 256
+        },
+        "email": {
+          "type": "string",
+          "description": "Registered tenant email address",
+          "maxLength": 256
+        },
+        "tier": {
+          "type": "string",
+          "description": "Subscription tier",
+          "enum": ["starter", "pro", "enterprise"]
+        },
+        "status": {
+          "type": "string",
+          "description": "Rental status",
+          "enum": ["active", "suspended", "expired"]
+        },
+        "reportsQuota": {
+          "type": "number",
+          "description": "Monthly report limit or -1 for unlimited"
+        },
+        "reportsUsed": {
+          "type": "number",
+          "description": "Reports created this billing period"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update ISO timestamp"
+        }
+      },
+      "required": ["id", "companyName", "email", "tier", "status"]
+    }
+  },
+  "firestore": {
+    "/reports/{reportId}": {
+      "schema": {
+        "$ref": "#/entities/Report"
+      },
+      "description": "Stores commissioning test report documents and inspection metadata"
+    },
+    "/reports/{reportId}/photos/{photoId}": {
+      "schema": {
+        "$ref": "#/entities/ReportPhoto"
+      },
+      "description": "Stores individual visual inspection photos and multimeter readings per report"
+    },
+    "/tenants/{tenantId}": {
+      "schema": {
+        "$ref": "#/entities/Tenant"
+      },
+      "description": "Stores rental contractor tenant accounts, quotas, and subscription statuses"
+    }
+  }
+}

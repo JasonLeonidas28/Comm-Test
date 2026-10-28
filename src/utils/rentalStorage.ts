@@ -1,5 +1,6 @@
 import { RentalTenant, AuthSession, DEFAULT_TIER_FEATURES, RentalTier } from '../types/rental';
 import { DEFAULT_VGREEN_LOGO } from './sampleData';
+import { saveTenantToFirestore, deleteTenantFromFirestore } from '../firebase/tenantService';
 
 const STORAGE_RENTAL_TENANTS_KEY = 'vgreen_rental_tenants_v1';
 const STORAGE_AUTH_SESSION_KEY = 'vgreen_auth_session_v1';
@@ -121,8 +122,8 @@ export const INITIAL_RENTAL_TENANTS: RentalTenant[] = [
 
 export const OWNER_DEFAULT_SESSION: AuthSession = {
   role: 'owner',
-  userEmail: 'admin@vgreen.id',
-  userName: 'Jason (Platform Owner / Penjual)',
+  userEmail: 'voltcheck@admin.com',
+  userName: 'Admin VoltCheck',
   loginTime: new Date().toISOString(),
 };
 
@@ -216,14 +217,23 @@ export function saveRentalTenant(tenant: RentalTenant): RentalTenant[] {
 
   const tenants = getRentalTenants();
   const idx = tenants.findIndex((t) => t.id === tenant.id);
+  let updatedTenant: RentalTenant;
   let updated: RentalTenant[];
   if (idx >= 0) {
+    updatedTenant = { ...tenant, updatedAt: new Date().toISOString() };
     updated = [...tenants];
-    updated[idx] = { ...tenant, updatedAt: new Date().toISOString() };
+    updated[idx] = updatedTenant;
   } else {
-    updated = [{ ...tenant, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, ...tenants];
+    updatedTenant = { ...tenant, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    updated = [updatedTenant, ...tenants];
   }
   saveRentalTenants(updated);
+
+  // Sync with Firestore Cloud Database asynchronously
+  saveTenantToFirestore(updatedTenant).catch((err) => {
+    console.warn('Firestore tenant auto-save notice:', err);
+  });
+
   return updated;
 }
 
@@ -244,6 +254,11 @@ export function deleteRentalTenant(id: string): RentalTenant[] {
   try {
     localStorage.setItem(STORAGE_INITIALIZED_KEY, 'true');
   } catch (e) {}
+
+  // 4. Delete from Firestore Cloud Database
+  deleteTenantFromFirestore(id).catch((err) => {
+    console.warn('Firestore tenant delete notice:', err);
+  });
 
   return updated;
 }

@@ -17,6 +17,10 @@ import {
   AlertCircle,
   LogOut,
 } from 'lucide-react';
+import {
+  loginOrLinkWithEmail,
+  formatFirebaseAuthError,
+} from '../firebase/authService';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -43,48 +47,77 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleCustomSubmit = (e: React.FormEvent) => {
+  const handleCustomSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     setIsLoading(true);
 
-    const cleanEmail = emailInput.toLowerCase().trim();
+    const cleanInput = emailInput.toLowerCase().trim();
     const cleanPassword = passwordInput.trim();
 
-    // Check if owner login
+    if (!cleanInput || !cleanPassword) {
+      setErrorMessage('Email dan kata sandi wajib diisi.');
+      setIsLoading(false);
+      return;
+    }
+
+    let targetEmail = cleanInput;
+    let displayName = '';
+    let isTargetOwner = false;
+
+    // Check if shortcut for Owner
     if (
-      cleanEmail === 'admin@vgreen.id' ||
-      cleanEmail === 'owner' ||
-      cleanEmail === 'admin'
+      cleanInput === 'voltcheck@admin' ||
+      cleanInput === 'voltcheck@admin.com' ||
+      cleanInput === 'admin@voltcheck.id' ||
+      cleanInput === 'admin@vgreen.id' ||
+      cleanInput === 'owner' ||
+      cleanInput === 'admin'
     ) {
+      targetEmail = 'voltcheck@admin.com';
+      displayName = 'Admin VoltCheck';
+      isTargetOwner = true;
+    } else {
+      const foundTenant = getRentalTenantByEmailOrCode(cleanInput);
+      if (foundTenant) {
+        targetEmail = foundTenant.email;
+        displayName = `${foundTenant.picName} (${foundTenant.shortCode})`;
+      }
+    }
+
+    if (!targetEmail.includes('@')) {
+      setErrorMessage('Format email tidak valid. Masukkan email lengkap.');
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      // Authenticate with Firebase Email & Password
+      const user = await loginOrLinkWithEmail(
+        targetEmail,
+        cleanPassword,
+        displayName,
+        true
+      );
+
+      const userEmail = (user.email || targetEmail).toLowerCase().trim();
+
       if (
-        cleanPassword === 'admin123' ||
-        cleanPassword === 'owner123' ||
-        cleanPassword === 'admin' ||
-        cleanPassword === 'password123'
+        isTargetOwner ||
+        userEmail === 'voltcheck@admin.com' ||
+        userEmail === 'admin@vgreen.id' ||
+        userEmail === 'kerjaanjason@gmail.com' ||
+        userEmail.startsWith('admin@') ||
+        userEmail.includes('voltcheck')
       ) {
         onLoginSuccess(OWNER_DEFAULT_SESSION);
         setIsLoading(false);
         onClose();
         return;
-      } else {
-        setErrorMessage('Kata sandi untuk akun Penjual (Admin) salah. Periksa kembali.');
-        setIsLoading(false);
-        return;
       }
-    }
 
-    // Check if matching tenant using robust lookup & fallback
-    const foundTenant = getRentalTenantByEmailOrCode(cleanEmail);
-
-    if (foundTenant) {
-      const validPass = foundTenant.password || 'password123';
-      if (
-        cleanPassword === validPass ||
-        cleanPassword === 'password123' ||
-        cleanPassword === 'admin123' ||
-        cleanPassword === 'admin'
-      ) {
+      const foundTenant = getRentalTenantByEmailOrCode(userEmail);
+      if (foundTenant) {
         const session: AuthSession = {
           role: 'tenant',
           tenantId: foundTenant.id,
@@ -98,15 +131,24 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         setIsLoading(false);
         onClose();
         return;
-      } else {
-        setErrorMessage('Kata sandi salah. Silakan coba kembali.');
-        setIsLoading(false);
-        return;
       }
-    }
 
-    setErrorMessage('Email/Username tidak ditemukan. Pastikan akun sudah didaftarkan.');
-    setIsLoading(false);
+      const session: AuthSession = {
+        role: 'tenant',
+        tenantId: `tenant-${user.uid.slice(0, 8)}`,
+        tenantName: user.displayName || userEmail.split('@')[0],
+        userEmail: userEmail,
+        userName: user.displayName || userEmail.split('@')[0],
+        loginTime: new Date().toISOString(),
+        impersonatedByOwner: false,
+      };
+      onLoginSuccess(session);
+      setIsLoading(false);
+      onClose();
+    } catch (err: any) {
+      setErrorMessage(formatFirebaseAuthError(err));
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -194,7 +236,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   required
                   value={emailInput}
                   onChange={(e) => setEmailInput(e.target.value)}
-                  placeholder="Masukkan email (contoh: admin@vgreen.id)"
+                  placeholder="Masukkan alamat email Anda..."
                   className="w-full pl-9 pr-3 py-2.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
                 />
               </div>

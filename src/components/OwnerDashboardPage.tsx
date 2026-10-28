@@ -1,14 +1,17 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { RentalTenant, RentalTier, RentalStatus, DEFAULT_TIER_FEATURES } from '../types/rental';
 import { CommissioningReport } from '../types/report';
 import {
   getRentalTenants,
   saveRentalTenant,
+  saveRentalTenants,
   deleteRentalTenant,
   renewTenantRental,
   toggleTenantStatus,
   getDaysRemaining,
+  getDeletedTenantIds,
 } from '../utils/rentalStorage';
+import { getAllTenantsFromFirestore, subscribeToTenants } from '../firebase/tenantService';
 import {
   Building2,
   Users,
@@ -37,6 +40,7 @@ import {
   ChevronRight,
   ExternalLink,
   X,
+  Database,
 } from 'lucide-react';
 
 interface OwnerDashboardPageProps {
@@ -46,6 +50,7 @@ interface OwnerDashboardPageProps {
   onOpenPrintReport: (report: CommissioningReport) => void;
   onDeleteReport?: (reportId: string) => void;
   reports: CommissioningReport[];
+  onOpenDatabaseModal?: () => void;
 }
 
 export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
@@ -55,6 +60,7 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
   onOpenPrintReport,
   onDeleteReport,
   reports,
+  onOpenDatabaseModal,
 }) => {
   const [tenants, setTenants] = useState<RentalTenant[]>(() => getRentalTenants());
   const [activeTab, setActiveTab] = useState<'tenants' | 'reports' | 'tiers' | 'invoice'>('tenants');
@@ -82,6 +88,54 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
   const refreshTenants = () => {
     setTenants(getRentalTenants());
   };
+
+  // Sync and subscribe to Firestore Cloud Database tenants in real-time
+  useEffect(() => {
+    let isMounted = true;
+
+    // 1. Initial sync with Firestore
+    getAllTenantsFromFirestore()
+      .then((cloudTenants) => {
+        if (!isMounted) return;
+        if (cloudTenants && cloudTenants.length > 0) {
+          const deletedIds = getDeletedTenantIds();
+          const cleanCloud = cloudTenants.filter((t) => !deletedIds.includes(t.id));
+          const localTenants = getRentalTenants();
+          const localMap = new Map<string, RentalTenant>();
+          localTenants.forEach((t) => localMap.set(t.id, t));
+          cleanCloud.forEach((t) => localMap.set(t.id, t));
+          const merged = Array.from(localMap.values());
+          saveRentalTenants(merged);
+          setTenants(merged);
+        }
+      })
+      .catch((err) => {
+        console.warn('Initial Firestore tenant sync notice:', err);
+      });
+
+    // 2. Real-time subscription to tenants collection
+    const unsub = subscribeToTenants(
+      (cloudTenants) => {
+        if (!isMounted) return;
+        if (cloudTenants && cloudTenants.length > 0) {
+          const deletedIds = getDeletedTenantIds();
+          const clean = cloudTenants.filter((t) => !deletedIds.includes(t.id));
+          if (clean.length > 0) {
+            setTenants(clean);
+            saveRentalTenants(clean);
+          }
+        }
+      },
+      (err) => {
+        console.warn('Firestore tenants real-time listener error:', err);
+      }
+    );
+
+    return () => {
+      isMounted = false;
+      unsub();
+    };
+  }, []);
 
   // Metrics calculation
   const metrics = useMemo(() => {
@@ -195,7 +249,7 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
         })\n` +
         `• Kuota Laporan: ${tenant.reportsUsed}/${tenant.reportsQuota === -1 ? 'Unlimited' : tenant.reportsQuota} terpakai\n\n` +
         `Untuk melanjutkan kelancaran inspeksi dan pembuatan laporan tim surveyor Anda di lapangan, silakan konfirmasi perpanjangan sewa melalui pesan ini.\n\n` +
-        `Terima kasih!\nPengelola V-Green Commissioning System`
+        `Terima kasih!\nPengelola VoltCheck System`
     );
 
     window.open(`https://wa.me/${phoneFormatted}?text=${message}`, '_blank');
@@ -263,7 +317,7 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-black text-sm tracking-wide text-white uppercase">
-                  V-Green SaaS Hub
+                  VoltCheck SaaS Hub
                 </span>
                 <span className="px-2 py-0.5 bg-amber-400 text-slate-950 text-[10px] font-black rounded uppercase">
                   👑 Dashboard Penjual (Owner)
@@ -276,6 +330,19 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap">
+            {onOpenDatabaseModal && (
+              <button
+                type="button"
+                onClick={onOpenDatabaseModal}
+                className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition-colors"
+                title="Buka status dan sinkronisasi Database Cloud Firestore"
+              >
+                <Database className="w-4 h-4 text-emerald-400" />
+                <span>Database Cloud</span>
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleNewTenantClick}

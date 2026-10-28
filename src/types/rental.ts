@@ -1,4 +1,4 @@
-export type RentalTier = 'starter' | 'pro' | 'enterprise' | 'custom';
+export type RentalTier = 'trial' | 'starter' | 'pro' | 'enterprise' | 'custom';
 export type RentalStatus = 'active' | 'trial' | 'expired' | 'suspended';
 
 export interface TenantFeatures {
@@ -63,6 +63,21 @@ export interface AuthSession {
 }
 
 export const DEFAULT_TIER_FEATURES: Record<RentalTier, { name: string; price: number; quota: number; features: TenantFeatures }> = {
+  trial: {
+    name: 'Free Trial (1 Token)',
+    price: 0,
+    quota: 1, // 1 Token uji coba gratis!
+    features: {
+      canExportPdf: true,
+      canWhiteLabel: false,
+      canExportZip: false,
+      canUsePunchlist: true,
+      canUseAuditTools: true,
+      canUseBarcodeScanner: true,
+      canUseGeoLocation: true,
+      allowCustomClientLogo: false,
+    },
+  },
   starter: {
     name: 'Starter Surveyor',
     price: 350000,

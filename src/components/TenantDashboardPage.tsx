@@ -69,7 +69,7 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
     const cleanPhone = tenant.phone.replace(/[^0-9]/g, '');
     const phoneFormatted = cleanPhone.startsWith('0') ? '62' + cleanPhone.slice(1) : cleanPhone;
     const message = encodeURIComponent(
-      `Halo Pengelola V-Green System,\n\nSaya dari ${tenant.companyName} ingin konfirmasi perpanjangan sewa / upgrade fitur aplikasi:\n` +
+      `Halo Pengelola VoltCheck System,\n\nSaya dari ${tenant.companyName} ingin konfirmasi perpanjangan sewa / upgrade fitur aplikasi:\n` +
         `• Paket: ${tenant.tierName}\n` +
         `• Status: ${isExpired ? 'Habis (Expired)' : `Tersisa ${daysLeft} hari`}\n` +
         `• Kuota: ${tenant.reportsUsed}/${tenant.reportsQuota === -1 ? 'Unlimited' : tenant.reportsQuota} laporan\n\n` +
@@ -163,7 +163,7 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
             <button
               type="button"
               onClick={handleContactSellerWA}
-              className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shrink-0 flex items-center gap-1.5 shadow-md"
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shrink-0 flex items-center gap-1.5 shadow-md cursor-pointer"
             >
               <MessageSquare className="w-4 h-4" />
               Perpanjang Sekarang via WhatsApp
@@ -185,51 +185,110 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
             <button
               type="button"
               onClick={handleContactSellerWA}
-              className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs rounded-xl shrink-0 flex items-center gap-1.5"
+              className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs rounded-xl shrink-0 flex items-center gap-1.5 cursor-pointer"
             >
               <MessageSquare className="w-4 h-4" />
               Hubungi Pengelola
             </button>
           </div>
         ) : (
-          /* Active Subscription Card */
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-black text-xl">
-                {tenant.shortCode || 'BSS'}
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-base font-bold text-white">Status Lisensi Sewa Anda</h2>
-                  <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 text-[10px] font-bold rounded">
-                    Aktif
+          <>
+            {/* Quota Exhausted Warning Banner for Trial or Limited Plans */}
+            {isQuotaFull && (
+              <div className="bg-amber-950/80 border-2 border-amber-500 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-200 animate-fade-in shadow-lg">
+                <div className="flex items-center gap-3">
+                  <span className="p-2.5 bg-amber-900 rounded-xl text-amber-300 shrink-0">
+                    <AlertTriangle className="w-6 h-6" />
                   </span>
+                  <div>
+                    <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                      <span>
+                        {tenant.tier === 'trial'
+                          ? 'Kuota Free Trial 1 Token Anda Telah Habis'
+                          : 'Batas Kuota Paket Telah Tercapai'}
+                      </span>
+                      <span className="px-2 py-0.5 bg-rose-500/20 text-rose-300 border border-rose-500/40 rounded text-[10px] font-bold">
+                        {tenant.reportsUsed} / {tenant.reportsQuota} Laporan Terpakai
+                      </span>
+                    </h3>
+                    <p className="text-xs text-amber-200/90 mt-1 leading-relaxed">
+                      {tenant.tier === 'trial'
+                        ? 'Anda telah menggunakan kuota uji coba 1 token laporan. Untuk melanjutkan membuat laporan stasiun berikutnya tanpa batas, silakan upgrade ke Paket Starter, Pro, atau Enterprise.'
+                        : 'Seluruh kuota laporan pada paket langganan Anda telah digunakan. Hubungi admin untuk menambah kuota (top-up) atau upgrade paket.'}
+                    </p>
+                  </div>
                 </div>
-                <div className="text-xs text-slate-400 mt-1 flex items-center gap-3 flex-wrap">
-                  <span className="flex items-center gap-1 text-emerald-400 font-semibold">
-                    <Clock className="w-3.5 h-3.5" />
-                    Sisa {daysLeft} Hari (s/d {tenant.endDate})
-                  </span>
-                  <span>•</span>
-                  <span>
-                    Kuota Terpakai: <strong className="text-white font-mono">{tenant.reportsUsed}</strong> / {tenant.reportsQuota === -1 ? 'Unlimited' : `${tenant.reportsQuota} Laporan`}
-                  </span>
-                </div>
+                <button
+                  type="button"
+                  onClick={handleContactSellerWA}
+                  className="px-4 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white font-black text-xs rounded-xl shrink-0 flex items-center gap-2 shadow-md shadow-emerald-900/30 cursor-pointer transition-transform hover:scale-[1.02]"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-200" />
+                  <span>Upgrade Paket Berbayar</span>
+                </button>
               </div>
-            </div>
+            )}
 
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={onNewReport}
-                disabled={isExpired || isSuspended || isQuotaFull}
-                className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all hover:scale-[1.02]"
-              >
-                <Plus className="w-4 h-4" />
-                + Buat Laporan Commissioning Baru
-              </button>
+            {/* Active Subscription Card */}
+            <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-black text-xl">
+                  {tenant.shortCode || 'BSS'}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-base font-bold text-white">Status Lisensi Sewa Anda</h2>
+                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${
+                      tenant.tier === 'trial'
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    }`}>
+                      {tenant.tier === 'trial' ? '🎁 Free Trial 1 Token' : 'Aktif'}
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-400 mt-1 flex items-center gap-3 flex-wrap">
+                    <span className="flex items-center gap-1 text-emerald-400 font-semibold">
+                      <Clock className="w-3.5 h-3.5" />
+                      Sisa {daysLeft} Hari (s/d {tenant.endDate})
+                    </span>
+                    <span>•</span>
+                    <span>
+                      {tenant.tier === 'trial' ? 'Token Uji Coba: ' : 'Kuota Terpakai: '}
+                      <strong className={`font-mono ${isQuotaFull ? 'text-rose-400 font-bold' : 'text-white'}`}>
+                        {tenant.reportsUsed}
+                      </strong> / {tenant.reportsQuota === -1 ? 'Unlimited' : `${tenant.reportsQuota} Laporan`}
+                      {tenant.tier === 'trial' && (
+                        <span className="ml-1.5 text-amber-300 font-medium">
+                          ({Math.max(0, 1 - tenant.reportsUsed)} token tersisa)
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={onNewReport}
+                  disabled={isExpired || isSuspended || isQuotaFull}
+                  className={`px-4 py-2.5 font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all ${
+                    isQuotaFull
+                      ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed opacity-60'
+                      : 'bg-emerald-600 hover:bg-emerald-500 text-white hover:scale-[1.02] cursor-pointer'
+                  }`}
+                  title={
+                    isQuotaFull
+                      ? 'Kuota laporan telah habis. Upgrade paket untuk membuat laporan baru.'
+                      : 'Buat laporan baru'
+                  }
+                >
+                  <Plus className="w-4 h-4" />
+                  + Buat Laporan Commissioning Baru
+                </button>
+              </div>
             </div>
-          </div>
+          </>
         )}
 
         {/* Reports Header & Search Toolbar */}

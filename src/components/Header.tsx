@@ -21,6 +21,8 @@ import {
   ArrowLeft,
   LogOut,
   Crown,
+  Database,
+  Cloud,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -42,6 +44,9 @@ interface HeaderProps {
   activeTenantName?: string;
   tenantTierName?: string;
   tenantDaysLeft?: number;
+  // Database Cloud controls
+  onOpenDatabaseModal?: () => void;
+  dbSyncStatus?: 'idle' | 'syncing' | 'synced' | 'error';
   // Auth & Rental SaaS controls
   onOpenLogin: () => void;
   onLogout?: () => void;
@@ -72,6 +77,8 @@ export const Header: React.FC<HeaderProps> = ({
   activeTenantName,
   tenantTierName,
   tenantDaysLeft,
+  onOpenDatabaseModal,
+  dbSyncStatus = 'idle',
   onOpenLogin,
   onLogout,
   onOpenOwnerDashboard,
@@ -135,7 +142,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h1 className="font-black text-slate-900 text-sm md:text-base tracking-tight">
-                  V-GREEN COMM TEST REPORT
+                  VOLTCHECK COMM TEST REPORT
                 </h1>
                 <span
                   className={`px-2 py-0.5 rounded text-[10px] font-black tracking-wide uppercase border ${
@@ -160,8 +167,29 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Right: Active Role Pill & Print PDF Button */}
+          {/* Right: Cloud Database (Admin Only), Active Role Pill & Print PDF Button */}
           <div className="flex items-center gap-2 justify-end shrink-0">
+            {isOwner && onOpenDatabaseModal && (
+              <button
+                type="button"
+                onClick={onOpenDatabaseModal}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-xs transition-all hover:border-slate-300"
+                title="Status Sinkronisasi Cloud Firestore Database (Admin / Penjual)"
+              >
+                <Database className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="hidden sm:inline">Database Cloud</span>
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    dbSyncStatus === 'syncing'
+                      ? 'bg-amber-500 animate-spin'
+                      : dbSyncStatus === 'error'
+                      ? 'bg-rose-500'
+                      : 'bg-emerald-500 animate-pulse'
+                  }`}
+                />
+              </button>
+            )}
+
             {isOwner ? (
               /* Penjual (Admin) Pill */
               <div className="flex items-center gap-2 bg-slate-900 text-amber-300 px-3 py-1.5 rounded-xl border border-amber-400/30 text-xs font-bold shadow-xs">

@@ -54,6 +54,7 @@ export interface GroundingDetails {
 
 export interface CommissioningReport {
   id: string;
+  tenantId?: string;
   title: string;
   createdAt: string;
   updatedAt: string;

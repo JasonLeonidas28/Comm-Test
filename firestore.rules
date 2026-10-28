@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Security & Helper Functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'kerjaanjason@gmail.com' ||
+        request.auth.token.email == 'voltcheck@admin.com' ||
+        request.auth.token.email == 'admin@vgreen.id' ||
+        (request.auth.token.email is string && request.auth.token.email.matches('.*admin.*'))
+      );
+    }
+
+    // Entity validation
+    function isValidReport(data) {
+      return data.id is string && data.id.size() <= 128
+        && (!('title' in data) || (data.title is string && data.title.size() <= 256))
+        && (!('createdAt' in data) || data.createdAt is string)
+        && (!('updatedAt' in data) || data.updatedAt is string);
+    }
+
+    function isValidPhoto(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.reportId is string && data.reportId.size() <= 128
+        && (!('sectionKey' in data) || data.sectionKey is string)
+        && (!('photoKey' in data) || data.photoKey is string);
+    }
+
+    function isValidTenant(data) {
+      return data.id is string && data.id.size() <= 128
+        && (!('companyName' in data) || data.companyName is string)
+        && (!('email' in data) || data.email is string);
+    }
+
+    // 1. Connection Healthcheck Document (Required by Firebase skill initialization)
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // 2. Commissioning Reports Collection
+    match /reports/{reportId} {
+      allow get: if isValidId(reportId);
+      allow list: if true;
+      allow create: if isValidId(reportId) && isValidReport(incoming());
+      allow update: if isValidId(reportId) && isValidReport(incoming());
+      allow delete: if isValidId(reportId);
+
+      // Photos Subcollection (Stores individual photos to respect the 1MB Firestore document limit)
+      match /photos/{photoId} {
+        allow get: if isValidId(reportId) && isValidId(photoId);
+        allow list: if isValidId(reportId);
+        allow create, update: if isValidId(reportId) && isValidId(photoId) && isValidPhoto(incoming());
+        allow delete: if isValidId(reportId) && isValidId(photoId);
+      }
+    }
+
+    // 3. Contractor Rental Tenants Collection
+    match /tenants/{tenantId} {
+      allow get: if isValidId(tenantId);
+      allow list: if true;
+      allow create: if isValidId(tenantId) && isValidTenant(incoming());
+      allow update: if isValidId(tenantId) && isValidTenant(incoming());
+      allow delete: if isValidId(tenantId);
+    }
+  }
+}
