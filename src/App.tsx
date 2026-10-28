@@ -36,7 +36,6 @@ import {
   saveRentalTenant,
   saveRentalTenants,
   incrementTenantReportUsage,
-  decrementTenantReportUsage,
   OWNER_DEFAULT_SESSION,
   getDaysRemaining,
 } from './utils/rentalStorage';
@@ -146,6 +145,7 @@ export default function App() {
   const [currentView, setCurrentView] = useState<'dashboard' | 'editor' | 'print'>('dashboard');
   const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
   const [isOwnerDashboardOpen, setIsOwnerDashboardOpen] = useState<boolean>(false);
+  const [tenantsVersion, setTenantsVersion] = useState<number>(0);
 
   // Current Rental Tenant info if tenant role is active
   const currentRentalTenant = useMemo(() => {
@@ -153,7 +153,7 @@ export default function App() {
       return getRentalTenantById(authSession.tenantId);
     }
     return undefined;
-  }, [authSession, isOwnerDashboardOpen]);
+  }, [authSession, isOwnerDashboardOpen, tenantsVersion]);
 
   // Reports strictly filtered/scoped to current tenant (or all for owner)
   const tenantReports = useMemo(() => {
@@ -607,6 +607,7 @@ export default function App() {
         return;
       }
       incrementTenantReportUsage(currentRentalTenant.id);
+      setTenantsVersion((v) => v + 1);
     }
 
     const empty = createEmptyReport();
@@ -674,6 +675,7 @@ export default function App() {
         return;
       }
       incrementTenantReportUsage(currentRentalTenant.id);
+      setTenantsVersion((v) => v + 1);
     }
 
     const newId = `report-${Date.now()}`;
@@ -761,10 +763,9 @@ export default function App() {
       saveDeletedReportIds(deletedIds);
     }
 
-    // 2. Decrement tenant report usage if deleted by tenant
-    if (authSession?.role === 'tenant' && currentRentalTenant) {
-      decrementTenantReportUsage(currentRentalTenant.id);
-    }
+    // 2. Token usage is permanent and strictly 1x use (non-refundable).
+    // Deleting a report does NOT restore or refund tokens for any tenant/free trial.
+    setTenantsVersion((v) => v + 1);
 
     // 3. Delete from Firestore Cloud Database
     deleteReportFromFirestore(id).catch((err) =>
@@ -863,7 +864,7 @@ export default function App() {
       startDate: new Date().toISOString().split('T')[0],
       endDate: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
       reportsQuota: 1, // Free trial strictly 1 Token!
-      reportsUsed: tenantReports.length,
+      reportsUsed: 0,
       features: { ...DEFAULT_TIER_FEATURES.trial.features },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -874,15 +875,23 @@ export default function App() {
       saveRentalTenant(activeTenant);
     }
 
-    const tenantWithActualCount: RentalTenant = {
+    // Cumulative token tracking: once a report is created, reportsUsed is permanent (non-refundable).
+    // Deleting a report from the list does NOT decrease reportsUsed or return tokens.
+    const effectiveReportsUsed = Math.max(activeTenant.reportsUsed || 0, tenantReports.length);
+    if (effectiveReportsUsed > (activeTenant.reportsUsed || 0)) {
+      activeTenant.reportsUsed = effectiveReportsUsed;
+      saveRentalTenant(activeTenant);
+    }
+
+    const tenantWithPermanentUsage: RentalTenant = {
       ...activeTenant,
-      reportsUsed: tenantReports.length,
+      reportsUsed: effectiveReportsUsed,
     };
 
     return (
       <TenantDashboardPage
         session={authSession}
-        tenant={tenantWithActualCount}
+        tenant={tenantWithPermanentUsage}
         reports={tenantReports}
         onOpenReportEditor={(reportId) => {
           if (reportId) setCurrentId(reportId);

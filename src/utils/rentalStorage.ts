@@ -315,17 +315,10 @@ export function incrementTenantReportUsage(tenantId: string): void {
   saveRentalTenant(updated);
 }
 
-export function decrementTenantReportUsage(tenantId: string): void {
-  const tenants = getRentalTenants();
-  const tenant = tenants.find((t) => t.id === tenantId);
-  if (!tenant || tenant.reportsUsed <= 0) return;
-
-  const updated: RentalTenant = {
-    ...tenant,
-    reportsUsed: Math.max(0, tenant.reportsUsed - 1),
-    updatedAt: new Date().toISOString(),
-  };
-  saveRentalTenant(updated);
+export function decrementTenantReportUsage(_tenantId: string): void {
+  // Intentionally disabled: report tokens are non-refundable once consumed.
+  // Deleting a report does NOT restore tokens or free trial quota (strictly 1x use).
+  console.info('Report tokens are permanent and non-refundable upon deletion.');
 }
 
 // Days remaining calculation helper
