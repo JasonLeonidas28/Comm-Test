@@ -66,6 +66,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     let isTargetOwner = false;
 
     // Check if shortcut for Owner
+    const foundTenant = getRentalTenantByEmailOrCode(cleanInput);
     if (
       cleanInput === 'voltcheck@admin' ||
       cleanInput === 'voltcheck@admin.com' ||
@@ -77,11 +78,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       targetEmail = 'voltcheck@admin.com';
       displayName = 'Admin VoltCheck';
       isTargetOwner = true;
-    } else {
-      const foundTenant = getRentalTenantByEmailOrCode(cleanInput);
-      if (foundTenant) {
-        targetEmail = foundTenant.email;
-        displayName = `${foundTenant.picName} (${foundTenant.shortCode})`;
+    } else if (foundTenant) {
+      targetEmail = foundTenant.email;
+      displayName = `${foundTenant.picName} (${foundTenant.shortCode})`;
+      // Validate customer password against password set by admin
+      if (foundTenant.password && cleanPassword !== foundTenant.password.trim()) {
+        setErrorMessage('Kata sandi salah. Masukkan kata sandi yang telah ditentukan oleh Admin untuk akun ini.');
+        setIsLoading(false);
+        return;
       }
     }
 
@@ -116,14 +120,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         return;
       }
 
-      const foundTenant = getRentalTenantByEmailOrCode(userEmail);
-      if (foundTenant) {
+      const verifiedTenant = getRentalTenantByEmailOrCode(userEmail) || foundTenant;
+      if (verifiedTenant) {
         const session: AuthSession = {
           role: 'tenant',
-          tenantId: foundTenant.id,
-          tenantName: foundTenant.companyName,
-          userEmail: foundTenant.email,
-          userName: `${foundTenant.picName} (${foundTenant.shortCode})`,
+          tenantId: verifiedTenant.id,
+          tenantName: verifiedTenant.companyName,
+          userEmail: verifiedTenant.email,
+          userName: `${verifiedTenant.picName} (${verifiedTenant.shortCode})`,
           loginTime: new Date().toISOString(),
           impersonatedByOwner: false,
         };
@@ -146,6 +150,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       setIsLoading(false);
       onClose();
     } catch (err: any) {
+      // If Firebase Auth threw an error but credentials match the tenant registered by owner
+      if (foundTenant && foundTenant.password && foundTenant.password.trim() === cleanPassword) {
+        const session: AuthSession = {
+          role: 'tenant',
+          tenantId: foundTenant.id,
+          tenantName: foundTenant.companyName,
+          userEmail: foundTenant.email,
+          userName: `${foundTenant.picName} (${foundTenant.shortCode})`,
+          loginTime: new Date().toISOString(),
+          impersonatedByOwner: false,
+        };
+        onLoginSuccess(session);
+        setIsLoading(false);
+        onClose();
+        return;
+      }
       setErrorMessage(formatFirebaseAuthError(err));
       setIsLoading(false);
     }

@@ -41,6 +41,10 @@ import {
   ExternalLink,
   X,
   Database,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Sparkles,
 } from 'lucide-react';
 
 interface OwnerDashboardPageProps {
@@ -51,6 +55,20 @@ interface OwnerDashboardPageProps {
   onDeleteReport?: (reportId: string) => void;
   reports: CommissioningReport[];
   onOpenDatabaseModal?: () => void;
+}
+
+// Helper to generate a friendly, secure random password for customers
+function generateSecurePassword(): string {
+  const chars = 'abcdefghjkmnpqrstuvwxyz';
+  const numbers = '23456789';
+  let rand = '';
+  for (let i = 0; i < 4; i++) {
+    rand += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  for (let i = 0; i < 3; i++) {
+    rand += numbers.charAt(Math.floor(Math.random() * numbers.length));
+  }
+  return `Volt${rand}`;
 }
 
 export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
@@ -70,6 +88,8 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
   // Modal State for Add / Edit Tenant
   const [editingTenant, setEditingTenant] = useState<RentalTenant | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [showFormPassword, setShowFormPassword] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const [tenantToDelete, setTenantToDelete] = useState<RentalTenant | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -256,24 +276,47 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
   };
 
   const handleSaveTenantForm = (tenantData: RentalTenant) => {
-    saveRentalTenant(tenantData);
+    if (!tenantData.companyName.trim()) {
+      setFormError('Nama perusahaan / vendor wajib diisi.');
+      return;
+    }
+    if (!tenantData.email.trim() || !tenantData.email.includes('@')) {
+      setFormError('Alamat email login wajib diisi dengan format valid (@).');
+      return;
+    }
+    const cleanPassword = (tenantData.password || '').trim();
+    if (!cleanPassword || cleanPassword.length < 6) {
+      setFormError('Kata sandi wajib diisi minimal 6 karakter.');
+      return;
+    }
+
+    const payload: RentalTenant = {
+      ...tenantData,
+      companyName: tenantData.companyName.trim(),
+      email: tenantData.email.toLowerCase().trim(),
+      password: cleanPassword,
+    };
+
+    saveRentalTenant(payload);
     refreshTenants();
     setIsFormOpen(false);
     setEditingTenant(null);
-    showToast(`Data penyewa "${tenantData.companyName}" berhasil disimpan!`);
+    setFormError(null);
+    showToast(`Data customer "${payload.companyName}" dan kredensial login berhasil disimpan!`);
   };
 
   const handleNewTenantClick = () => {
     const today = new Date().toISOString().split('T')[0];
     const end = new Date();
     end.setDate(end.getDate() + 30);
+    const newPass = generateSecurePassword();
 
     const emptyTenant: RentalTenant = {
       id: `tenant-${Date.now()}`,
       companyName: '',
       shortCode: '',
       email: '',
-      password: 'password123',
+      password: newPass,
       picName: '',
       phone: '',
       address: '',
@@ -294,6 +337,8 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
     };
 
     setEditingTenant(emptyTenant);
+    setShowFormPassword(true);
+    setFormError(null);
     setIsFormOpen(true);
   };
 
@@ -592,8 +637,29 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                                   <div className="text-[11px] text-slate-400 mt-0.5">
                                     PIC: {t.picName} • {t.phone}
                                   </div>
-                                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-                                    Login: {t.email}
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono mt-1">
+                                    <span className="text-slate-400">
+                                      Email: <span className="text-slate-200 font-semibold">{t.email}</span>
+                                    </span>
+                                    <span className="text-slate-600">|</span>
+                                    <span className="text-slate-400 flex items-center gap-1">
+                                      Sandi:
+                                      <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-emerald-400 font-bold select-all">
+                                        {t.password || 'password123'}
+                                      </span>
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const text = `Email: ${t.email}\nSandi: ${t.password || 'password123'}\nPortal: ${window.location.origin}`;
+                                        navigator.clipboard.writeText(text);
+                                        showToast(`Kredensial login ${t.shortCode} berhasil disalin!`);
+                                      }}
+                                      className="p-1 hover:text-emerald-400 text-slate-400 rounded transition-colors"
+                                      title="Salin Email & Sandi"
+                                    >
+                                      <Copy className="w-3 h-3" />
+                                    </button>
                                   </div>
                                 </div>
                               </div>
@@ -778,11 +844,39 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                                     <MessageSquare className="w-3.5 h-3.5" />
                                   </button>
 
+                                  {/* Kirim Kredensial WA */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const cleanPhone = t.phone.replace(/[^0-9]/g, '');
+                                      const phoneFormatted = cleanPhone.startsWith('0') ? '62' + cleanPhone.slice(1) : cleanPhone;
+                                      const msg = encodeURIComponent(
+                                        `Halo Bapak/Ibu ${t.picName} (${t.companyName}),\n\n` +
+                                          `Berikut kredensial login aplikasi VoltCheck Commissioning Test Anda:\n` +
+                                          `• Email Login: ${t.email}\n` +
+                                          `• Kata Sandi: ${t.password || 'password123'}\n` +
+                                          `• Paket: ${t.tierName}\n` +
+                                          `• Link Portal: ${window.location.origin}\n\n` +
+                                          `Silakan masuk menggunakan email dan kata sandi di atas. Terima kasih!\nTim VoltCheck`
+                                      );
+                                      window.open(`https://wa.me/${phoneFormatted}?text=${msg}`, '_blank');
+                                    }}
+                                    className="p-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-lg transition-colors"
+                                    title="Kirim Email & Sandi ke WhatsApp Customer"
+                                  >
+                                    <KeyRound className="w-3.5 h-3.5" />
+                                  </button>
+
                                   {/* Edit */}
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      setEditingTenant(t);
+                                      setEditingTenant({
+                                        ...t,
+                                        password: t.password || 'password123',
+                                      });
+                                      setShowFormPassword(false);
+                                      setFormError(null);
                                       setIsFormOpen(true);
                                     }}
                                     className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors"
@@ -1214,33 +1308,152 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {formError && (
+                <div className="p-3 bg-rose-500/20 border border-rose-500/40 rounded-xl text-rose-300 text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <span>{formError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-300 mb-1">Nama PIC</label>
+                  <label className="block font-bold text-slate-300 mb-1">Nama PIC Penanggung Jawab</label>
                   <input
                     type="text"
                     value={editingTenant.picName}
                     onChange={(e) => setEditingTenant({ ...editingTenant, picName: e.target.value })}
+                    placeholder="Budi Santoso"
                     className="w-full p-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-300 mb-1">No WhatsApp</label>
+                  <label className="block font-bold text-slate-300 mb-1">No WhatsApp PIC</label>
                   <input
                     type="text"
                     value={editingTenant.phone}
                     onChange={(e) => setEditingTenant({ ...editingTenant, phone: e.target.value })}
+                    placeholder="0812-3456-7890"
                     className="w-full p-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                   />
                 </div>
-                <div>
-                  <label className="block font-bold text-slate-300 mb-1">Email Login</label>
-                  <input
-                    type="email"
-                    value={editingTenant.email}
-                    onChange={(e) => setEditingTenant({ ...editingTenant, email: e.target.value })}
-                    className="w-full p-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
-                  />
+              </div>
+
+              {/* Kredensial Login Customer & Set Password */}
+              <div className="p-3.5 bg-slate-950 border border-emerald-500/40 rounded-xl space-y-3 shadow-inner">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 font-bold text-xs text-emerald-400">
+                    <KeyRound className="w-4 h-4" />
+                    <span>Kredensial Login Customer (Email & Set Password)</span>
+                  </div>
+                  <span className="text-[10px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded font-medium">
+                    Akses Masuk Portal
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-300 mb-1">
+                      Email Login <span className="text-rose-400">*</span>
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      value={editingTenant.email}
+                      onChange={(e) => setEditingTenant({ ...editingTenant, email: e.target.value })}
+                      placeholder="contoh: surveyor@perusahaan.com"
+                      className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono text-xs focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="font-semibold text-slate-300 text-xs">
+                        Set Kata Sandi <span className="text-rose-400">*</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const newPass = generateSecurePassword();
+                          setEditingTenant({ ...editingTenant, password: newPass });
+                          setShowFormPassword(true);
+                          showToast('Kata sandi acak baru berhasil dibuat!');
+                        }}
+                        className="text-[10px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 underline underline-offset-2 cursor-pointer"
+                        title="Buat kata sandi acak otomatis"
+                      >
+                        <Sparkles className="w-3 h-3" />
+                        Generate Sandi Acak
+                      </button>
+                    </div>
+                    <div className="relative">
+                      <input
+                        type={showFormPassword ? 'text' : 'password'}
+                        required
+                        value={editingTenant.password || ''}
+                        onChange={(e) => setEditingTenant({ ...editingTenant, password: e.target.value })}
+                        placeholder="Minimal 6 karakter..."
+                        className="w-full pl-3 pr-10 py-2.5 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono text-xs focus:border-emerald-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowFormPassword(!showFormPassword)}
+                        className="absolute right-2.5 top-2.5 text-slate-400 hover:text-white p-0.5 cursor-pointer"
+                        title={showFormPassword ? 'Sembunyikan sandi' : 'Tampilkan kata sandi'}
+                      >
+                        {showFormPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Helper info & Quick Share Credential Buttons */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-900 text-[11px]">
+                  <div className="text-slate-400">
+                    Sandi ini digunakan customer untuk login langsung ke aplikasi VoltCheck.
+                  </div>
+                  {editingTenant.email && editingTenant.password && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const text = `Halo Bapak/Ibu ${editingTenant.picName || 'Customer'} (${editingTenant.companyName || 'Vendor'}),\n\n` +
+                            `Berikut kredensial login aplikasi VoltCheck Commissioning Test Anda:\n` +
+                            `• Email Login: ${editingTenant.email}\n` +
+                            `• Kata Sandi: ${editingTenant.password}\n` +
+                            `• Paket Sewa: ${editingTenant.tierName}\n` +
+                            `• Link Portal: ${window.location.origin}\n\n` +
+                            `Silakan gunakan email & kata sandi tersebut untuk masuk ke portal. Terima kasih!\nTim VoltCheck`;
+                          navigator.clipboard.writeText(text);
+                          showToast('Email & Sandi berhasil disalin ke clipboard!');
+                        }}
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-md font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3 text-emerald-400" />
+                        Salin Kredensial
+                      </button>
+                      {editingTenant.phone && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const clean = editingTenant.phone.replace(/[^0-9]/g, '');
+                            const phone = clean.startsWith('0') ? '62' + clean.slice(1) : clean;
+                            const text = `Halo Bapak/Ibu ${editingTenant.picName || 'Customer'} (${editingTenant.companyName || 'Vendor'}),\n\n` +
+                              `Berikut kredensial login aplikasi VoltCheck Commissioning Test Anda:\n` +
+                              `• Email Login: ${editingTenant.email}\n` +
+                              `• Kata Sandi: ${editingTenant.password}\n` +
+                              `• Paket Sewa: ${editingTenant.tierName}\n` +
+                              `• Link Portal: ${window.location.origin}\n\n` +
+                              `Silakan gunakan email & kata sandi tersebut untuk masuk ke portal. Terima kasih!\nTim VoltCheck`;
+                            window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
+                          }}
+                          className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <MessageSquare className="w-3 h-3" />
+                          Kirim ke WA Customer
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
