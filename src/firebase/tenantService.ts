@@ -36,7 +36,40 @@ export async function getAllTenantsFromFirestore(): Promise<RentalTenant[]> {
     });
     return tenants;
   } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, path);
+    console.warn('getAllTenantsFromFirestore warning:', error);
+    return [];
+  }
+}
+
+export async function findTenantByEmailOrShortCode(query: string): Promise<RentalTenant | null> {
+  if (!query) return null;
+  const clean = query.toLowerCase().trim();
+  const cleanPrefix = clean.split('@')[0].trim();
+  try {
+    const tenants = await getAllTenantsFromFirestore();
+    const match = tenants.find((t) => {
+      if (!t) return false;
+      const tEmail = (t.email || '').toLowerCase().trim();
+      const tEmailPrefix = tEmail.split('@')[0].trim();
+      const tCode = (t.shortCode || '').toLowerCase().trim();
+      const tId = (t.id || '').toLowerCase().trim();
+      const tCompany = (t.companyName || '').toLowerCase().trim();
+
+      return (
+        tEmail === clean ||
+        tCode === clean ||
+        tId === clean ||
+        tEmailPrefix === clean ||
+        (cleanPrefix && tCode === cleanPrefix) ||
+        (cleanPrefix && tEmailPrefix === cleanPrefix) ||
+        (clean.includes(tCode) && tCode.length >= 2) ||
+        tCompany === clean
+      );
+    });
+    return match || null;
+  } catch (error) {
+    console.warn('findTenantByEmailOrShortCode warning:', error);
+    return null;
   }
 }
 

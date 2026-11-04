@@ -18,6 +18,31 @@ const todayStr = new Date().toISOString().split('T')[0];
 
 export const INITIAL_RENTAL_TENANTS: RentalTenant[] = [
   {
+    id: 'tenant-1793328794264',
+    companyName: 'PT Banyu Mas Satria',
+    shortCode: 'BMS',
+    email: 'bms@voltcheck',
+    password: 'admin12345',
+    picName: 'Saiful',
+    phone: '0853-1021-8623',
+    address: 'Indonesia',
+    tier: 'pro',
+    tierName: 'Pro Commissioning',
+    status: 'active',
+    rentalFeeMonthly: 850000,
+    paymentStatus: 'paid',
+    startDate: addDays(todayStr, -5),
+    endDate: addDays(todayStr, 25),
+    reportsQuota: -1,
+    reportsUsed: 0,
+    features: { ...DEFAULT_TIER_FEATURES.pro.features, canWhiteLabel: true },
+    brandColor: 'emerald',
+    reportPrefix: 'BMS-COMM',
+    notes: 'Akun customer PT Banyu Mas Satria dibuat oleh Admin VoltCheck.',
+    createdAt: addDays(todayStr, -5),
+    updatedAt: todayStr,
+  },
+  {
     id: 'tenant-vtech',
     companyName: 'PT V-Tech Mitra Nusantara',
     shortCode: 'VMN',
@@ -155,7 +180,24 @@ export function getRentalTenants(): RentalTenant[] {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         // Return stored list, permanently filtering out deleted tenants
-        return parsed.filter((t) => !deletedIds.includes(t.id));
+        const storedClean = parsed.filter((t) => !deletedIds.includes(t.id));
+        const storedIds = new Set(storedClean.map((t) => t.id));
+        const storedEmails = new Set(storedClean.map((t) => (t.email || '').toLowerCase().trim()));
+
+        // Ensure newly registered seed tenants (such as BMS) are automatically available even in pre-existing localStorage
+        const missingInitial = INITIAL_RENTAL_TENANTS.filter(
+          (t) => !deletedIds.includes(t.id) && !storedIds.has(t.id) && !storedEmails.has((t.email || '').toLowerCase().trim())
+        );
+
+        if (missingInitial.length > 0) {
+          const merged = [...missingInitial, ...storedClean];
+          try {
+            localStorage.setItem(STORAGE_RENTAL_TENANTS_KEY, JSON.stringify(merged));
+          } catch (e) {}
+          return merged;
+        }
+
+        return storedClean;
       }
     }
   } catch (e) {
@@ -191,19 +233,32 @@ export function getRentalTenantById(id: string): RentalTenant | undefined {
 }
 
 export function getRentalTenantByEmailOrCode(query: string): RentalTenant | undefined {
+  if (!query) return undefined;
   const clean = query.toLowerCase().trim();
+  const cleanPrefix = clean.split('@')[0].trim();
   const deletedIds = getDeletedTenantIds();
   const tenants = getRentalTenants();
 
   // Search exclusively in active storage (deleted tenants can never be retrieved)
-  const match = tenants.find(
-    (t) =>
-      !deletedIds.includes(t.id) &&
-      (t.email.toLowerCase().trim() === clean ||
-        t.shortCode.toLowerCase().trim() === clean ||
-        t.id.toLowerCase() === clean ||
-        t.email.split('@')[0].toLowerCase() === clean)
-  );
+  const match = tenants.find((t) => {
+    if (!t || deletedIds.includes(t.id)) return false;
+    const tEmail = (t.email || '').toLowerCase().trim();
+    const tEmailPrefix = tEmail.split('@')[0].trim();
+    const tCode = (t.shortCode || '').toLowerCase().trim();
+    const tId = (t.id || '').toLowerCase().trim();
+    const tCompany = (t.companyName || '').toLowerCase().trim();
+
+    return (
+      tEmail === clean ||
+      tCode === clean ||
+      tId === clean ||
+      tEmailPrefix === clean ||
+      (cleanPrefix && tCode === cleanPrefix) ||
+      (cleanPrefix && tEmailPrefix === cleanPrefix) ||
+      (clean.includes(tCode) && tCode.length >= 2) ||
+      tCompany === clean
+    );
+  });
 
   return match;
 }

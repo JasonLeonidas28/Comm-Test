@@ -35,6 +35,7 @@ import {
   getRentalTenantById,
   saveRentalTenant,
   saveRentalTenants,
+  getDeletedTenantIds,
   incrementTenantReportUsage,
   OWNER_DEFAULT_SESSION,
   getDaysRemaining,
@@ -343,23 +344,35 @@ export default function App() {
           }
           setLastSyncTime(new Date().toISOString());
           setDbSyncStatus('synced');
-          // Sync tenants from Firestore
+        }
+
+        // Always sync rental tenants from Firestore Cloud Database
+        try {
           const cloudTenants = await getAllTenantsFromFirestore();
           if (cloudTenants && cloudTenants.length > 0) {
             const localTenants = getRentalTenants();
-            const localIds = new Set(localTenants.map((t) => t.id));
-            let hasNew = false;
-            const merged = [...localTenants];
-            cloudTenants.forEach((ct) => {
-              if (!localIds.has(ct.id)) {
-                merged.push(ct);
-                hasNew = true;
+            const deletedTenantIds = getDeletedTenantIds();
+            const tenantMap = new Map<string, RentalTenant>();
+
+            // Seed with local tenants not deleted
+            localTenants.forEach((t) => {
+              if (!deletedTenantIds.includes(t.id)) {
+                tenantMap.set(t.id, t);
               }
             });
-            if (hasNew) {
-              saveRentalTenants(merged);
-            }
+
+            // Merge cloud tenants (cloud takes priority for freshest admin updates)
+            cloudTenants.forEach((ct) => {
+              if (!deletedTenantIds.includes(ct.id)) {
+                tenantMap.set(ct.id, ct);
+              }
+            });
+
+            saveRentalTenants(Array.from(tenantMap.values()));
+            setTenantsVersion((v) => v + 1);
           }
+        } catch (tenantSyncErr) {
+          console.warn('Firestore tenants fetch notice:', tenantSyncErr);
         }
       } catch (err) {
         console.warn('Initial Firestore sync notice:', err);
@@ -388,9 +401,40 @@ export default function App() {
       }
     );
 
+    // Attach real-time listener to Firestore tenants
+    const unsubTenants = subscribeToTenants(
+      (updatedCloudTenants) => {
+        if (!isMounted) return;
+        if (updatedCloudTenants && updatedCloudTenants.length > 0) {
+          const deletedTenantIds = getDeletedTenantIds();
+          const localTenants = getRentalTenants();
+          const tenantMap = new Map<string, RentalTenant>();
+
+          localTenants.forEach((t) => {
+            if (!deletedTenantIds.includes(t.id)) {
+              tenantMap.set(t.id, t);
+            }
+          });
+
+          updatedCloudTenants.forEach((ct) => {
+            if (!deletedTenantIds.includes(ct.id)) {
+              tenantMap.set(ct.id, ct);
+            }
+          });
+
+          saveRentalTenants(Array.from(tenantMap.values()));
+          setTenantsVersion((v) => v + 1);
+        }
+      },
+      (err) => {
+        console.warn('Real-time tenant listener note:', err);
+      }
+    );
+
     return () => {
       isMounted = false;
       unsubReports();
+      unsubTenants();
     };
   }, []);
 
