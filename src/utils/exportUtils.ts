@@ -1,6 +1,12 @@
 import JSZip from 'jszip';
 import { CommissioningReport } from '../types/report';
 import { evaluateGrounding, evaluateVoltagePhaseNeutral, evaluateVoltagePhasePhase, evaluateVoltageNeutralGround } from './complianceUtils';
+import {
+  calculateCommissioningScore,
+  calculatePhaseUnbalance,
+  computeReportVerificationCode,
+  evaluateElectricalStatus,
+} from './electricalValidation';
 
 /**
  * Downloads all report photos packaged neatly in a structured ZIP archive
@@ -236,6 +242,76 @@ export function exportReportSummaryCSV(report: CommissioningReport): void {
       'Aman <= 2.0 V (Maks 5 V)',
       evaluateVoltageNeutralGround(acPanelTesting.voltageNG.measurementValue).label,
     ],
+    ...(report.fieldTesting
+      ? [
+          ['', '', '', ''],
+          ['UJI KELISTRIKAN LANJUTAN & K3', '', '', ''],
+          [
+            'Tegangan 3-Fasa (S-N / T-N)',
+            `"${report.fieldTesting.voltageSN || '-'} V / ${report.fieldTesting.voltageTN || '-'} V"`,
+            '220 V +-10%',
+            calculatePhaseUnbalance(
+              acPanelTesting.voltageRN.measurementValue,
+              report.fieldTesting.voltageSN,
+              report.fieldTesting.voltageTN
+            ).label,
+          ],
+          [
+            'Tegangan Line-to-Line (R-S / S-T / R-T)',
+            `"${report.fieldTesting.voltageRS || '-'} / ${report.fieldTesting.voltageST || '-'} / ${report.fieldTesting.voltageRT || '-'} V"`,
+            '380 V +-10%',
+            '-',
+          ],
+          [
+            'Uji Trip RCCB / ELCB',
+            `"${report.fieldTesting.rccbRatingMa || '30'} mA / ${report.fieldTesting.rccbTripTimeMs || '-'} ms"`,
+            'Maks <= 300 ms',
+            report.fieldTesting.rccbTripTimeMs
+              ? Number(report.fieldTesting.rccbTripTimeMs) <= 300
+                ? 'PASS'
+                : 'GAGAL'
+              : '-',
+          ],
+          [
+            'Uji Isolasi Kabel (Megger)',
+            `"${report.fieldTesting.insulationMohm || '-'} MOhm"`,
+            'Min >= 1.0 MOhm',
+            '-',
+          ],
+          [
+            'Thermal Terminasi MCB / Busbar',
+            `"${report.fieldTesting.panelTempCelsius || '-'} C"`,
+            'Maks <= 65 C',
+            '-',
+          ],
+          [
+            'Checklist K3 (Torsi / LOTO / APD / APAR)',
+            `"Torsi:${report.fieldTesting.torqueChecked ? 'OK' : '-'} | LOTO:${report.fieldTesting.k3LotoApplied ? 'OK' : '-'} | APD:${report.fieldTesting.k3ApdVerified ? 'OK' : '-'} | Area:${report.fieldTesting.k3FireExtAvailable ? 'OK' : '-'}"`,
+            'K3 Wajib',
+            '-',
+          ],
+          [
+            'Alat Ukur & Kalibrasi',
+            `"${report.fieldTesting.instrumentName || '-'} (SN: ${report.fieldTesting.instrumentSerial || '-'})"`,
+            `Kalibrasi: ${report.fieldTesting.instrumentCalDate || '-'}`,
+            '-',
+          ],
+        ]
+      : []),
+    ['', '', '', ''],
+    ['SKOR KESIAPAN & VERIFIKASI BAST', '', '', ''],
+    [
+      'Skor Kesiapan Commissioning',
+      `"${calculateCommissioningScore(report).totalScore}%"`,
+      '100% Optimal',
+      calculateCommissioningScore(report).gradeLabel,
+    ],
+    [
+      'Kode Segel Verifikasi BAST',
+      `"${computeReportVerificationCode(report)}"`,
+      'Digital Fingerprint',
+      'Terverifikasi',
+    ],
     ['', '', '', ''],
     ['PERSETUJUAN (SIGN-OFF)', '', '', ''],
     ['Prepared By', `"${approval.preparedBy.name} (${approval.preparedBy.company})"`, `Tgl: ${approval.preparedBy.date || '-'}`, approval.preparedBy.signatureImage ? 'Sudah TTD' : 'Belum TTD'],
@@ -257,3 +333,72 @@ export function exportReportSummaryCSV(report: CommissioningReport): void {
   document.body.removeChild(anchor);
   URL.revokeObjectURL(downloadUrl);
 }
+
+/**
+ * Exports a master consolidated Excel CSV table covering all stations in the contractor/owner portfolio.
+ */
+export function exportAllReportsMasterCSV(reports: CommissioningReport[], scopeLabel = 'VoltCheck'): void {
+  const header = [
+    'NO',
+    'PLANT NAME',
+    'TIPE CHARGER',
+    'S/N CHARGER UNIT',
+    'VENDOR PELAKSANA',
+    'TGL COMMISSIONING',
+    'KOORDINAT GPS',
+    'FOTO TERISI',
+    'SKOR BAST (%)',
+    'GROUNDING (OHM)',
+    'TEGANGAN R-N (V)',
+    'TEGANGAN N-G (V)',
+    'STATUS PUIL',
+    'PUNCHLIST OPEN',
+    'STATUS TTD BAST',
+    'KODE VERIFIKASI',
+  ];
+
+  const rows = reports.map((r, idx) => {
+    const score = calculateCommissioningScore(r);
+    const verdict = evaluateElectricalStatus(r);
+    const openPunch = r.punchlist?.filter((p) => p.status !== 'Resolved').length || 0;
+    const ttdCount = [
+      r.approval.preparedBy.signatureImage,
+      r.approval.checkedBy.signatureImage,
+      r.approval.approvedBy.signatureImage,
+    ].filter(Boolean).length;
+
+    return [
+      String(idx + 1),
+      `"${(r.generalInfo.plantName || 'Tanpa Nama').replace(/"/g, '""')}"`,
+      `"${(r.generalInfo.evChargerType || '-').replace(/"/g, '""')}"`,
+      `"${(r.generalInfo.snChargerUnit || '-').replace(/"/g, '""')}"`,
+      `"${(r.generalInfo.installationVendor || '-').replace(/"/g, '""')}"`,
+      `"${r.generalInfo.commissioningDate || '-'}"`,
+      `"${r.generalInfo.plantCoordinate || '-'}"`,
+      `"${score.filledPhotos}/${score.totalPhotos}"`,
+      `"${score.totalScore}%"`,
+      `"${r.groundingVisual.groundingTestOhm.measurementValue || '-'} Ohm"`,
+      `"${r.acPanelTesting.voltageRN.measurementValue || '-'} V"`,
+      `"${r.acPanelTesting.voltageNG.measurementValue || '-'} V"`,
+      `"${verdict.status}"`,
+      String(openPunch),
+      `"${ttdCount}/3 TTD"`,
+      `"${computeReportVerificationCode(r)}"`,
+    ];
+  });
+
+  const csvContent = '\uFEFF' + [header, ...rows].map((row) => row.join(';')).join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const cleanScope = scopeLabel.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const filename = `Master_Rekap_Stasiun_${cleanScope}_${new Date().toISOString().slice(0, 10)}.csv`;
+
+  const downloadUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = downloadUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(downloadUrl);
+}
+

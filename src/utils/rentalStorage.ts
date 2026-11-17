@@ -1,6 +1,7 @@
 import { RentalTenant, AuthSession, DEFAULT_TIER_FEATURES, RentalTier } from '../types/rental';
 import { DEFAULT_VGREEN_LOGO } from './sampleData';
 import { saveTenantToFirestore, deleteTenantFromFirestore } from '../firebase/tenantService';
+import { createPasswordCredentials, stripPlaintextPassword } from './security';
 
 const STORAGE_RENTAL_TENANTS_KEY = 'vgreen_rental_tenants_v1';
 const STORAGE_AUTH_SESSION_KEY = 'vgreen_auth_session_v1';
@@ -235,7 +236,7 @@ export function getRentalTenantById(id: string): RentalTenant | undefined {
 export function getRentalTenantByEmailOrCode(query: string): RentalTenant | undefined {
   if (!query) return undefined;
   const clean = query.toLowerCase().trim();
-  const cleanPrefix = clean.split('@')[0].trim();
+  const isFullEmail = clean.includes('@');
   const deletedIds = getDeletedTenantIds();
   const tenants = getRentalTenants();
 
@@ -246,18 +247,13 @@ export function getRentalTenantByEmailOrCode(query: string): RentalTenant | unde
     const tEmailPrefix = tEmail.split('@')[0].trim();
     const tCode = (t.shortCode || '').toLowerCase().trim();
     const tId = (t.id || '').toLowerCase().trim();
-    const tCompany = (t.companyName || '').toLowerCase().trim();
 
-    return (
-      tEmail === clean ||
-      tCode === clean ||
-      tId === clean ||
-      tEmailPrefix === clean ||
-      (cleanPrefix && tCode === cleanPrefix) ||
-      (cleanPrefix && tEmailPrefix === cleanPrefix) ||
-      (clean.includes(tCode) && tCode.length >= 2) ||
-      tCompany === clean
-    );
+    if (isFullEmail) {
+      // Exact email match when user logs in with an email address (allows @voltcheck alias matching exact email)
+      return tEmail === clean || (clean.endsWith('@voltcheck') && `${tEmailPrefix}@voltcheck` === clean);
+    }
+
+    return tCode === clean || tId === clean || tEmailPrefix === clean;
   });
 
   return match;
@@ -270,26 +266,58 @@ export function saveRentalTenant(tenant: RentalTenant): RentalTenant[] {
     saveDeletedTenantIds(deletedIds.filter((id) => id !== tenant.id));
   }
 
+  // Strip plaintext password once salted SHA-256 hash exists
+  const cleanObj: RentalTenant =
+    tenant.passwordHash && tenant.passwordSalt
+      ? (stripPlaintextPassword(tenant) as RentalTenant)
+      : { ...tenant };
+
   const tenants = getRentalTenants();
-  const idx = tenants.findIndex((t) => t.id === tenant.id);
+  const idx = tenants.findIndex((t) => t.id === cleanObj.id);
   let updatedTenant: RentalTenant;
   let updated: RentalTenant[];
   if (idx >= 0) {
-    updatedTenant = { ...tenant, updatedAt: new Date().toISOString() };
+    updatedTenant = { ...cleanObj, updatedAt: new Date().toISOString() };
     updated = [...tenants];
     updated[idx] = updatedTenant;
   } else {
-    updatedTenant = { ...tenant, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    updatedTenant = { ...cleanObj, createdAt: cleanObj.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
     updated = [updatedTenant, ...tenants];
   }
   saveRentalTenants(updated);
 
-  // Sync with Firestore Cloud Database asynchronously
+  // Sync with Firestore Cloud Database asynchronously (tenantService enforces SHA-256 hashing & strips plaintext password)
   saveTenantToFirestore(updatedTenant).catch((err) => {
     console.warn('Firestore tenant auto-save notice:', err);
   });
 
   return updated;
+}
+
+/**
+ * Migrates any legacy tenant records still carrying a plaintext `password` into
+ * salted SHA-256 credentials (`passwordHash` + `passwordSalt`) and removes plaintext `password`.
+ */
+export async function migrateLegacyTenantPasswords(): Promise<{ migratedCount: number }> {
+  const tenants = getRentalTenants();
+  let migratedCount = 0;
+
+  for (const t of tenants) {
+    if (!t.passwordHash || !t.passwordSalt || t.password) {
+      const sourcePass = (t.password || '').trim();
+      let nextTenant: RentalTenant = { ...t };
+      if (sourcePass && (!t.passwordHash || !t.passwordSalt)) {
+        const creds = await createPasswordCredentials(sourcePass);
+        nextTenant = { ...nextTenant, ...creds };
+      }
+      nextTenant = stripPlaintextPassword(nextTenant) as RentalTenant;
+      saveRentalTenant(nextTenant);
+      await saveTenantToFirestore(nextTenant).catch(() => {});
+      migratedCount++;
+    }
+  }
+
+  return { migratedCount };
 }
 
 export function deleteRentalTenant(id: string): RentalTenant[] {

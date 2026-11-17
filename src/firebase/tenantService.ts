@@ -5,10 +5,12 @@ import {
   getDocs,
   deleteDoc,
   onSnapshot,
+  deleteField,
 } from 'firebase/firestore';
 import { db } from './config';
 import { handleFirestoreError, OperationType } from './errorHandler';
 import { RentalTenant } from '../types/rental';
+import { createPasswordCredentials, stripPlaintextPassword } from '../utils/security';
 
 const TENANTS_COLLECTION = 'tenants';
 
@@ -16,11 +18,32 @@ export async function saveTenantToFirestore(tenant: RentalTenant): Promise<void>
   const path = `${TENANTS_COLLECTION}/${tenant.id}`;
   const ref = doc(db, TENANTS_COLLECTION, tenant.id);
 
+  let securedTenant: RentalTenant = { ...tenant };
+  if (securedTenant.password && securedTenant.password.trim() && !securedTenant.passwordHash) {
+    try {
+      const creds = await createPasswordCredentials(securedTenant.password.trim());
+      securedTenant = { ...securedTenant, ...creds };
+    } catch (e) {
+      console.warn('Could not hash password during Firestore save:', e);
+    }
+  }
+
+  // Strictly forbid storing plaintext password in Cloud Firestore and strip undefined keys
+  const stripped = stripPlaintextPassword(securedTenant);
+  const cleanFields = Object.fromEntries(
+    Object.entries(stripped).filter(([, v]) => v !== undefined)
+  );
+
+  const payload = {
+    ...cleanFields,
+    companyName: (securedTenant.companyName || '').trim().slice(0, 256),
+    email: (securedTenant.email || '').toLowerCase().trim().slice(0, 256),
+    updatedAt: new Date().toISOString(),
+    password: deleteField(),
+  };
+
   try {
-    await setDoc(ref, {
-      ...tenant,
-      updatedAt: new Date().toISOString(),
-    }, { merge: true });
+    await setDoc(ref, payload, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -44,7 +67,7 @@ export async function getAllTenantsFromFirestore(): Promise<RentalTenant[]> {
 export async function findTenantByEmailOrShortCode(query: string): Promise<RentalTenant | null> {
   if (!query) return null;
   const clean = query.toLowerCase().trim();
-  const cleanPrefix = clean.split('@')[0].trim();
+  const isFullEmail = clean.includes('@');
   try {
     const tenants = await getAllTenantsFromFirestore();
     const match = tenants.find((t) => {
@@ -53,18 +76,12 @@ export async function findTenantByEmailOrShortCode(query: string): Promise<Renta
       const tEmailPrefix = tEmail.split('@')[0].trim();
       const tCode = (t.shortCode || '').toLowerCase().trim();
       const tId = (t.id || '').toLowerCase().trim();
-      const tCompany = (t.companyName || '').toLowerCase().trim();
 
-      return (
-        tEmail === clean ||
-        tCode === clean ||
-        tId === clean ||
-        tEmailPrefix === clean ||
-        (cleanPrefix && tCode === cleanPrefix) ||
-        (cleanPrefix && tEmailPrefix === cleanPrefix) ||
-        (clean.includes(tCode) && tCode.length >= 2) ||
-        tCompany === clean
-      );
+      if (isFullEmail) {
+        return tEmail === clean || (clean.endsWith('@voltcheck') && `${tEmailPrefix}@voltcheck` === clean);
+      }
+
+      return tCode === clean || tId === clean || tEmailPrefix === clean;
     });
     return match || null;
   } catch (error) {

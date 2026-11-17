@@ -9,24 +9,30 @@ import {
   findTenantByEmailOrShortCode,
 } from '../firebase/tenantService';
 import {
-  ShieldCheck,
   Lock,
   Mail,
   KeyRound,
   Eye,
   EyeOff,
   AlertCircle,
-  CheckCircle2,
   ArrowRight,
-  Database,
   UserPlus,
-  Sparkles,
 } from 'lucide-react';
 import {
   loginWithGoogle,
   loginOrLinkWithEmail,
   formatFirebaseAuthError,
 } from '../firebase/authService';
+import {
+  verifyAdminPassword,
+  verifyTenantPassword,
+  createPasswordCredentials,
+  stripPlaintextPassword,
+  isAllowlistedOwnerEmail,
+  checkLoginRateLimit,
+  recordLoginAttempt,
+} from '../utils/security';
+import { logSecurityEvent } from '../firebase/securityLogService';
 import { NewCustomerOnboardingModal } from './NewCustomerOnboardingModal';
 
 interface LoginPageProps {
@@ -62,7 +68,24 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       return;
     }
 
-    // 1. Check Owner / Platform Admin login
+    // 0. Check Brute-Force Rate Limit before verifying credentials
+    const rateCheck = checkLoginRateLimit(cleanInput);
+    if (!rateCheck.allowed) {
+      setErrorMessage(
+        `Terlalu banyak percobaan login gagal. Demi keamanan akun, coba kembali dalam ${rateCheck.remainingSeconds} detik.`
+      );
+      logSecurityEvent({
+        eventType: 'rate_limit_blocked',
+        severity: 'critical',
+        actorEmail: cleanInput,
+        actorRole: 'anonymous',
+        summary: `Percobaan login diblokir sementara (${rateCheck.remainingSeconds}s cooldown) akibat 5x salah sandi.`,
+      });
+      setIsLoading(false);
+      return;
+    }
+
+    // 1. Check Owner / Platform Admin login (Strictly allowlisted, verified via SHA-256 digest)
     if (
       cleanInput === 'voltcheck@admin' ||
       cleanInput === 'voltcheck@admin.com' ||
@@ -71,13 +94,34 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       cleanInput === 'owner' ||
       cleanInput === 'admin'
     ) {
-      if (cleanPassword === 'admin12345678' || cleanPassword === 'admin') {
-        loginOrLinkWithEmail('voltcheck@admin.com', 'admin12345678', 'Admin VoltCheck', true).catch(() => {});
+      const isValidAdmin = await verifyAdminPassword(cleanPassword);
+      if (isValidAdmin) {
+        recordLoginAttempt(cleanInput, true);
+        loginOrLinkWithEmail('voltcheck@admin.com', cleanPassword, 'Admin VoltCheck', true).catch(() => {});
+        logSecurityEvent({
+          eventType: 'login_success',
+          severity: 'info',
+          actorEmail: 'voltcheck@admin.com',
+          actorRole: 'owner',
+          summary: 'Admin masuk ke dashboard pengelola.',
+        });
         onLoginSuccess(OWNER_DEFAULT_SESSION);
         setIsLoading(false);
         return;
       } else {
-        setErrorMessage('Kata sandi Admin salah. Gunakan sandi admin12345678.');
+        const failInfo = recordLoginAttempt(cleanInput, false);
+        logSecurityEvent({
+          eventType: 'login_failed',
+          severity: 'warning',
+          actorEmail: cleanInput,
+          actorRole: 'anonymous',
+          summary: `Percobaan login Admin gagal (sisa percobaan: ${failInfo.attemptsLeft}).`,
+        });
+        setErrorMessage(
+          failInfo.lockedNow
+            ? `Kata sandi Admin salah. Akun dikunci sementara selama ${failInfo.lockoutSeconds} detik.`
+            : `Kata sandi Admin salah. Sisa percobaan sebelum penguncian sementara: ${failInfo.attemptsLeft}x.`
+        );
         setIsLoading(false);
         return;
       }
@@ -86,7 +130,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     // 2. Check registered customer / tenant (created by admin or pre-existing)
     let foundTenant = getRentalTenantByEmailOrCode(cleanInput);
     if (!foundTenant) {
-      // If not in local storage on this client profile, query Firestore cloud database
       try {
         const cloudMatch = await findTenantByEmailOrShortCode(cleanInput);
         if (cloudMatch) {
@@ -100,25 +143,50 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
 
     // If found as registered customer
     if (foundTenant) {
-      const expectedPassword = (foundTenant.password || '').trim();
+      const { valid, needsMigration } = await verifyTenantPassword(cleanPassword, foundTenant);
 
-      // Validate customer password against password set by admin
-      const isPasswordValid =
-        !expectedPassword ||
-        cleanPassword === expectedPassword ||
-        cleanPassword === 'admin12345' ||
-        (cleanInput.includes('bms') && (cleanPassword === 'admin12345' || cleanPassword === 'Voltkytu364'));
-
-      if (!isPasswordValid) {
-        setErrorMessage('Kata sandi salah. Silakan masukkan kata sandi yang telah ditentukan oleh Admin.');
+      if (!valid) {
+        const failInfo = recordLoginAttempt(cleanInput, false);
+        logSecurityEvent({
+          eventType: 'login_failed',
+          severity: 'warning',
+          actorEmail: foundTenant.email,
+          actorRole: 'tenant',
+          targetId: foundTenant.id,
+          summary: `Login customer ${foundTenant.companyName} gagal (kata sandi tidak cocok).`,
+        });
+        setErrorMessage(
+          failInfo.lockedNow
+            ? `Kata sandi salah. Demi keamanan, akses login ditangguhkan ${failInfo.lockoutSeconds} detik.`
+            : `Email atau kata sandi salah. Hubungi Admin jika lupa sandi (sisa percobaan: ${failInfo.attemptsLeft}x).`
+        );
         setIsLoading(false);
         return;
       }
 
-      // Sync password if customer entered admin12345
-      if (cleanPassword && foundTenant.password !== cleanPassword) {
-        foundTenant.password = cleanPassword;
-        saveRentalTenant(foundTenant);
+      recordLoginAttempt(cleanInput, true);
+
+      // Automatically migrate legacy plaintext password to salted SHA-256 hash
+      if (needsMigration) {
+        try {
+          const creds = await createPasswordCredentials(cleanPassword);
+          const securedTenant = stripPlaintextPassword({
+            ...foundTenant,
+            ...creds,
+          }) as RentalTenant;
+          saveRentalTenant(securedTenant);
+          foundTenant = securedTenant;
+          logSecurityEvent({
+            eventType: 'password_migration',
+            severity: 'info',
+            actorEmail: foundTenant.email,
+            actorRole: 'system',
+            targetId: foundTenant.id,
+            summary: `Sandi akun ${foundTenant.companyName} otomatis ditingkatkan ke enkripsi SHA-256.`,
+          });
+        } catch (migErr) {
+          console.warn('Auto password migration notice:', migErr);
+        }
       }
 
       // Password is verified! Grant customer session immediately
@@ -132,7 +200,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
         impersonatedByOwner: false,
       };
 
-      // Best-effort Firebase Auth linking in background
       loginOrLinkWithEmail(
         foundTenant.email,
         cleanPassword,
@@ -142,13 +209,21 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
         console.info('Firebase Auth session sync note:', fbErr);
       });
 
+      logSecurityEvent({
+        eventType: 'login_success',
+        severity: 'info',
+        actorEmail: foundTenant.email,
+        actorRole: 'tenant',
+        targetId: foundTenant.id,
+        summary: `Customer ${foundTenant.companyName} (${foundTenant.shortCode}) berhasil masuk.`,
+      });
+
       onLoginSuccess(session);
       setIsLoading(false);
       return;
     }
 
     // 3. User is not a pre-registered tenant
-    // If input is an internal username or code format (@voltcheck) that does not exist:
     if (!cleanInput.includes('.') && cleanInput.includes('@voltcheck')) {
       setErrorMessage(`Akun "${cleanInput}" belum terdaftar di sistem VoltCheck. Silakan hubungi Admin untuk mendaftarkan akun.`);
       setIsLoading(false);
@@ -170,16 +245,22 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       );
 
       const userEmail = (user.email || cleanInput).toLowerCase().trim();
+      recordLoginAttempt(cleanInput, true);
 
-      // Check if Owner
-      if (
-        userEmail === 'voltcheck@admin.com' ||
-        userEmail === 'admin@vgreen.id' ||
-        userEmail === 'kerjaanjason@gmail.com' ||
-        userEmail.startsWith('admin@') ||
-        userEmail.includes('voltcheck')
-      ) {
-        onLoginSuccess(OWNER_DEFAULT_SESSION);
+      // Strict exact allowlist check for Owner role (prevents substring spoofing)
+      if (isAllowlistedOwnerEmail(userEmail)) {
+        logSecurityEvent({
+          eventType: 'login_success',
+          severity: 'info',
+          actorEmail: userEmail,
+          actorRole: 'owner',
+          summary: `Owner ${userEmail} masuk melalui Firebase Auth.`,
+        });
+        onLoginSuccess({
+          ...OWNER_DEFAULT_SESSION,
+          userEmail,
+          loginTime: new Date().toISOString(),
+        });
         return;
       }
 
@@ -205,12 +286,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
           loginTime: new Date().toISOString(),
           impersonatedByOwner: false,
         };
+        logSecurityEvent({
+          eventType: 'login_success',
+          severity: 'info',
+          actorEmail: verifiedTenant.email,
+          actorRole: 'tenant',
+          targetId: verifiedTenant.id,
+          summary: `Customer ${verifiedTenant.companyName} masuk via Firebase Auth.`,
+        });
         onLoginSuccess(session);
         return;
       }
 
-      // Customer account not registered in tenants list yet:
-      // Open onboarding modal to complete registration form & package selection
       setPendingOnboardingUser({
         email: userEmail,
         displayName: user.displayName || userEmail.split('@')[0],
@@ -218,6 +305,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       });
       setShowOnboardingModal(true);
     } catch (err: any) {
+      recordLoginAttempt(cleanInput, false);
+      logSecurityEvent({
+        eventType: 'login_failed',
+        severity: 'warning',
+        actorEmail: cleanInput,
+        actorRole: 'anonymous',
+        summary: `Gagal masuk Firebase Auth untuk ${cleanInput}: ${err?.code || 'unknown'}`,
+      });
       setErrorMessage(formatFirebaseAuthError(err));
     } finally {
       setIsLoading(false);
@@ -230,17 +325,22 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     try {
       const user = await loginWithGoogle();
       const userEmail = (user.email || '').toLowerCase().trim();
-      
-      // If admin or bootstrap email
-      if (
-        userEmail === 'voltcheck@admin.com' ||
-        userEmail === 'admin@voltcheck.id' ||
-        userEmail === 'admin@vgreen.id' ||
-        userEmail === 'kerjaanjason@gmail.com' ||
-        userEmail.startsWith('admin@') ||
-        userEmail.includes('voltcheck')
-      ) {
-        onLoginSuccess(OWNER_DEFAULT_SESSION);
+
+      // Strict exact allowlist check for Owner role
+      if (isAllowlistedOwnerEmail(userEmail)) {
+        logSecurityEvent({
+          eventType: 'login_success',
+          severity: 'info',
+          actorEmail: userEmail,
+          actorRole: 'owner',
+          summary: `Owner ${userEmail} masuk via Google Sign-In.`,
+        });
+        onLoginSuccess({
+          ...OWNER_DEFAULT_SESSION,
+          userEmail,
+          userName: user.displayName || OWNER_DEFAULT_SESSION.userName,
+          loginTime: new Date().toISOString(),
+        });
         return;
       }
 
@@ -257,6 +357,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       }
 
       if (foundTenant) {
+        logSecurityEvent({
+          eventType: 'login_success',
+          severity: 'info',
+          actorEmail: foundTenant.email,
+          actorRole: 'tenant',
+          targetId: foundTenant.id,
+          summary: `Customer ${foundTenant.companyName} masuk via Google Sign-In.`,
+        });
         onLoginSuccess({
           role: 'tenant',
           tenantId: foundTenant.id,
@@ -269,8 +377,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
         return;
       }
 
-      // New Google User: DO NOT allow direct unmetered access!
-      // Must complete the customer registration form and choose package (or Free Trial 1 Token)
       setPendingOnboardingUser({
         email: user.email || '',
         displayName: user.displayName || '',
@@ -331,58 +437,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
 
       {/* Main Login Container */}
       <main className="flex-1 flex items-center justify-center p-4 sm:p-6 my-auto">
-        <div className="w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden grid grid-cols-1 lg:grid-cols-12">
-          
-          {/* Left Column: Brand & Info */}
-          <div className="lg:col-span-5 bg-gradient-to-br from-emerald-950 via-slate-900 to-slate-950 p-6 sm:p-8 border-b lg:border-b-0 lg:border-r border-slate-800 flex flex-col justify-between">
-            <div>
-              <span className="text-[10px] font-bold tracking-wider uppercase text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-md">
-                BSS & EV Infrastructure
-              </span>
-              <h1 className="text-2xl font-black text-white mt-4 leading-tight">
-                Sistem Inspeksi & Persewaan Aplikasi
-              </h1>
-              <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                Platform digital untuk kontraktor lapangan, surveyor BSS, dan pemilik persewaan software. Dilengkapi standarisasi PUIL 2020, geotagging GPS, dan pelaporan BAST otomatis.
-              </p>
-
-              <div className="mt-6 space-y-3 text-xs text-slate-300">
-                <div className="flex items-center gap-2.5">
-                  <span className="w-5 h-5 rounded-md bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                  </span>
-                  <span>Penyimpanan Aman: Laporan Tersimpan Otomatis & Terenkripsi</span>
-                </div>
-                <div className="flex items-center gap-2.5">
-                  <span className="w-5 h-5 rounded-md bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                  </span>
-                  <span>Dashboard Pengelola Sewa & Pantau Semua Customer</span>
-                </div>
-                <div className="flex items-center gap-2.5">
-                  <span className="w-5 h-5 rounded-md bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                  </span>
-                  <span>Portal Khusus Penyewa dengan Pembatasan Fitur</span>
-                </div>
-                <div className="flex items-center gap-2.5">
-                  <span className="w-5 h-5 rounded-md bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                  </span>
-                  <span>Ekspor PDF BAST Resmi, White-Label, & Kuota Sewa</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="pt-6 border-t border-slate-800/80 text-[11px] text-slate-400 flex items-center justify-between">
-              <span>Keamanan Sesi Terisolasi</span>
-              <span>Sistem Terverifikasi</span>
-            </div>
-          </div>
-
-          {/* Right Column: Direct Login Form */}
-          <div className="lg:col-span-7 p-6 sm:p-8 bg-slate-900/90 flex flex-col justify-between">
-            <div>
+        <div className="w-full max-w-md bg-slate-900/95 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden p-6 sm:p-8 flex flex-col justify-between">
+          <div>
               <div className="mb-5">
                 <h2 className="text-xl font-bold text-white tracking-tight">Masuk ke Sistem</h2>
                 <p className="text-xs text-slate-400 mt-1">
@@ -504,9 +560,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
               </div>
             </div>
 
-            <div className="mt-6 pt-4 border-t border-slate-800/80 text-[11px] text-slate-500 text-center">
-              Aplikasi Commissioning Test BSS VoltCheck & Multi-Tenant Rental Platform
-            </div>
+          <div className="mt-6 pt-4 border-t border-slate-800/80 text-[11px] text-slate-500 text-center">
+            Aplikasi Commissioning Test BSS VoltCheck & Multi-Tenant Rental Platform
           </div>
         </div>
       </main>

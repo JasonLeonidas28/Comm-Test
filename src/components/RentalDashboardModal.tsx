@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { RentalTenant, RentalTier, RentalStatus, TenantFeatures, DEFAULT_TIER_FEATURES } from '../types/rental';
+import { getLocalSellerSettings } from '../firebase/billingService';
 import {
   getRentalTenants,
   saveRentalTenant,
@@ -1005,6 +1006,18 @@ export const RentalDashboardModal: React.FC<RentalDashboardModalProps> = ({
                   const discountAmount = (rawTotal * discountPercent) / 100;
                   const finalTotal = rawTotal - discountAmount;
 
+                  const seller = getLocalSellerSettings();
+                  const bankLines = [
+                    seller.bankPrimaryName && seller.bankPrimaryAccount
+                      ? `${seller.bankPrimaryName}: ${seller.bankPrimaryAccount} a/n ${seller.bankPrimaryHolder || seller.businessName}`
+                      : null,
+                    seller.bankSecondaryName && seller.bankSecondaryAccount
+                      ? `${seller.bankSecondaryName}: ${seller.bankSecondaryAccount} a/n ${seller.bankSecondaryHolder || seller.businessName}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join('\n');
+
                   const invoiceText =
                     `*INVOICE PERSEWAAN APLIKASI COMMISSIONING TEST BSS*\n` +
                     `No. Inv: INV-SEWA-${targetTenant.shortCode}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}\n` +
@@ -1022,10 +1035,9 @@ export const RentalDashboardModal: React.FC<RentalDashboardModalProps> = ({
                     (discountPercent > 0 ? `• Diskon Paket (${discountPercent}%): -Rp ${discountAmount.toLocaleString('id-ID')}\n` : '') +
                     `----------------------------------------\n` +
                     `*TOTAL PEMBAYARAN: Rp ${finalTotal.toLocaleString('id-ID')}*\n\n` +
-                    `Pembayaran dapat ditransfer ke rekening resmi kami:\n` +
-                    `Bank BCA: 123-456-7890 a/n PT V-Green Sistem Mandiri\n` +
-                    `Bank Mandiri: 987-00-1234567-8 a/n PT V-Green Sistem Mandiri\n\n` +
-                    `Setelah transfer, mohon kirim bukti pembayaran agar masa aktif aplikasi otomatis diperpanjang.\n\n` +
+                    `Pembayaran dapat ditransfer ke rekening resmi kami (${seller.businessName}):\n` +
+                    `${bankLines || 'Hubungi Admin untuk detail rekening pembayaran.'}\n\n` +
+                    `Setelah transfer, mohon upload bukti pembayaran di aplikasi atau kirim ke WhatsApp Admin agar masa aktif aplikasi otomatis diperpanjang.\n\n` +
                     `Terima kasih atas kerja samanya!`;
 
                   return (

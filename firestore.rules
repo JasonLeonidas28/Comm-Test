@@ -2,14 +2,14 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Default catch-all
+    // Default catch-all deny
     match /{document=**} {
       allow read, write: if false;
     }
 
     // Security & Helper Functions
     function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128;
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     function incoming() {
@@ -24,55 +24,146 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // Exact email allowlist + verified email requirement (prevents email spoofing)
     function isAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email == 'kerjaanjason@gmail.com' ||
-        request.auth.token.email == 'voltcheck@admin.com' ||
-        request.auth.token.email == 'admin@vgreen.id' ||
-        (request.auth.token.email is string && request.auth.token.email.matches('.*admin.*'))
-      );
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && (
+          request.auth.token.email == 'kerjaanjason@gmail.com' ||
+          request.auth.token.email == 'voltcheck@admin.com' ||
+          request.auth.token.email == 'admin@voltcheck.id' ||
+          request.auth.token.email == 'admin@vgreen.id'
+        );
     }
 
-    // Entity validation
+    // Entity validation blueprints
     function isValidReport(data) {
-      return data.id is string && data.id.size() <= 128
-        && (!('title' in data) || (data.title is string && data.title.size() <= 256))
-        && (!('createdAt' in data) || data.createdAt is string)
-        && (!('updatedAt' in data) || data.updatedAt is string);
+      return data.id is string && isValidId(data.id)
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 256
+        && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 64
+        && (!('tenantId' in data) || (data.tenantId is string && data.tenantId.size() <= 128))
+        && (!('creatorUid' in data) || (data.creatorUid is string && data.creatorUid.size() <= 128))
+        && (!('creatorEmail' in data) || (data.creatorEmail is string && data.creatorEmail.size() <= 256))
+        && (!('status' in data) || data.status in ['draft', 'submitted', 'approved', 'completed']);
     }
 
-    function isValidPhoto(data) {
-      return data.id is string && data.id.size() <= 128
-        && data.reportId is string && data.reportId.size() <= 128
-        && (!('sectionKey' in data) || data.sectionKey is string)
-        && (!('photoKey' in data) || data.photoKey is string);
+    function isValidPhoto(data, parentReportId) {
+      return data.id is string && isValidId(data.id)
+        && data.reportId is string && data.reportId == parentReportId
+        && data.sectionKey is string && data.sectionKey.size() > 0 && data.sectionKey.size() <= 64
+        && data.photoKey is string && data.photoKey.size() > 0 && data.photoKey.size() <= 64
+        && (!('label' in data) || (data.label is string && data.label.size() <= 256))
+        && (!('sublabel' in data) || (data.sublabel is string && data.sublabel.size() <= 256))
+        && (!('imageData' in data) || (data.imageData is string && data.imageData.size() <= 900000))
+        && (!('measurementValue' in data) || (data.measurementValue is string && data.measurementValue.size() <= 64))
+        && (!('measurementUnit' in data) || (data.measurementUnit is string && data.measurementUnit.size() <= 32))
+        && (!('caption' in data) || (data.caption is string && data.caption.size() <= 1000))
+        && (!('timestamp' in data) || (data.timestamp is string && data.timestamp.size() <= 64));
     }
 
     function isValidTenant(data) {
-      return data.id is string && data.id.size() <= 128
-        && (!('companyName' in data) || data.companyName is string)
-        && (!('email' in data) || data.email is string);
+      return data.id is string && isValidId(data.id)
+        && data.companyName is string && data.companyName.size() > 0 && data.companyName.size() <= 256
+        && data.email is string && data.email.size() > 0 && data.email.size() <= 256
+        && data.tier in ['trial', 'starter', 'pro', 'enterprise', 'custom']
+        && data.status in ['active', 'trial', 'suspended', 'expired']
+        // Strictly forbid plaintext passwords in Firestore
+        && !('password' in data)
+        && (!('passwordHash' in data) || (data.passwordHash is string && data.passwordHash.size() <= 128))
+        && (!('passwordSalt' in data) || (data.passwordSalt is string && data.passwordSalt.size() <= 64))
+        && (!('passwordUpdatedAt' in data) || (data.passwordUpdatedAt is string && data.passwordUpdatedAt.size() <= 64))
+        && (!('shortCode' in data) || (data.shortCode is string && data.shortCode.size() <= 32))
+        && (!('picName' in data) || (data.picName is string && data.picName.size() <= 128))
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 32))
+        && (!('address' in data) || (data.address is string && data.address.size() <= 500))
+        && (!('paymentStatus' in data) || data.paymentStatus in ['paid', 'pending', 'overdue'])
+        && (!('reportsQuota' in data) || (data.reportsQuota is number && data.reportsQuota >= -1 && data.reportsQuota <= 100000))
+        && (!('reportsUsed' in data) || (data.reportsUsed is number && data.reportsUsed >= 0 && data.reportsUsed <= 100000))
+        && (!('rentalFeeMonthly' in data) || (data.rentalFeeMonthly is number && data.rentalFeeMonthly >= 0 && data.rentalFeeMonthly <= 100000000))
+        && (!('logo' in data) || (data.logo is string && data.logo.size() <= 450000))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000));
     }
 
-    // 1. Connection Healthcheck Document (Required by Firebase skill initialization)
+    function isValidSellerSettings(data) {
+      return data.id == 'default'
+        && data.businessName is string && data.businessName.size() > 0 && data.businessName.size() <= 128
+        && data.adminWhatsapp is string && data.adminWhatsapp.size() > 0 && data.adminWhatsapp.size() <= 32
+        && (!('bankPrimaryName' in data) || (data.bankPrimaryName is string && data.bankPrimaryName.size() <= 64))
+        && (!('bankPrimaryAccount' in data) || (data.bankPrimaryAccount is string && data.bankPrimaryAccount.size() <= 64))
+        && (!('bankPrimaryHolder' in data) || (data.bankPrimaryHolder is string && data.bankPrimaryHolder.size() <= 128))
+        && (!('bankSecondaryName' in data) || (data.bankSecondaryName is string && data.bankSecondaryName.size() <= 64))
+        && (!('bankSecondaryAccount' in data) || (data.bankSecondaryAccount is string && data.bankSecondaryAccount.size() <= 64))
+        && (!('bankSecondaryHolder' in data) || (data.bankSecondaryHolder is string && data.bankSecondaryHolder.size() <= 128))
+        && (!('qrisImage' in data) || (data.qrisImage is string && data.qrisImage.size() <= 500000))
+        && (!('paymentNotes' in data) || (data.paymentNotes is string && data.paymentNotes.size() <= 500));
+    }
+
+    function isValidPaymentRequest(data) {
+      return data.id is string && isValidId(data.id)
+        && data.tenantId is string && isValidId(data.tenantId)
+        && data.requestedTier in ['trial', 'starter', 'pro', 'enterprise', 'custom']
+        && data.status in ['pending', 'approved', 'rejected']
+        && data.durationMonths is number && data.durationMonths >= 1 && data.durationMonths <= 36
+        && data.amount is number && data.amount >= 0 && data.amount <= 500000000
+        && (!('companyName' in data) || (data.companyName is string && data.companyName.size() <= 256))
+        && (!('shortCode' in data) || (data.shortCode is string && data.shortCode.size() <= 32))
+        && (!('picName' in data) || (data.picName is string && data.picName.size() <= 128))
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 32))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 256))
+        && (!('requestType' in data) || data.requestType in ['upgrade', 'renewal', 'activation'])
+        && (!('senderBankOrName' in data) || (data.senderBankOrName is string && data.senderBankOrName.size() <= 128))
+        && (!('proofImage' in data) || (data.proofImage is string && data.proofImage.size() <= 550000))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 500))
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 300));
+    }
+
+    function isValidSecurityLog(data) {
+      return data.keys().hasAll(['id', 'eventType', 'severity', 'actorEmail', 'actorRole', 'summary', 'createdAt'])
+        && data.keys().hasOnly(['id', 'eventType', 'severity', 'actorEmail', 'actorRole', 'targetId', 'summary', 'createdAt'])
+        && data.id is string && isValidId(data.id)
+        && data.eventType in [
+          'login_success', 'login_failed', 'rate_limit_blocked',
+          'password_updated', 'password_migration', 'tenant_created',
+          'tenant_deleted', 'payment_approved', 'payment_rejected',
+          'settings_updated', 'report_deleted'
+        ]
+        && data.severity in ['info', 'warning', 'critical']
+        && data.actorEmail is string && data.actorEmail.size() > 0 && data.actorEmail.size() <= 256
+        && data.actorRole in ['owner', 'tenant', 'system', 'anonymous']
+        && (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 128))
+        && data.summary is string && data.summary.size() > 0 && data.summary.size() <= 400
+        && data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 64;
+    }
+
+    // 1. Connection Healthcheck Document
     match /test/{docId} {
-      allow read: if true;
-      allow write: if true;
+      allow read: if isValidId(docId);
+      allow write: if false;
     }
 
     // 2. Commissioning Reports Collection
     match /reports/{reportId} {
       allow get: if isValidId(reportId);
       allow list: if true;
-      allow create: if isValidId(reportId) && isValidReport(incoming());
-      allow update: if isValidId(reportId) && isValidReport(incoming());
+      allow create: if isValidId(reportId) && isValidReport(incoming()) && incoming().id == reportId;
+      allow update: if isValidId(reportId)
+        && isValidReport(incoming())
+        && (!('id' in existing()) || incoming().id == existing().id)
+        && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
       allow delete: if isValidId(reportId);
 
-      // Photos Subcollection (Stores individual photos to respect the 1MB Firestore document limit)
+      // Photos Subcollection (Parent existence enforced via exists())
       match /photos/{photoId} {
         allow get: if isValidId(reportId) && isValidId(photoId);
         allow list: if isValidId(reportId);
-        allow create, update: if isValidId(reportId) && isValidId(photoId) && isValidPhoto(incoming());
+        allow create: if isValidId(reportId) && isValidId(photoId)
+          && isValidPhoto(incoming(), reportId)
+          && exists(/databases/$(database)/documents/reports/$(reportId));
+        allow update: if isValidId(reportId) && isValidId(photoId)
+          && isValidPhoto(incoming(), reportId)
+          && (!('id' in existing()) || incoming().id == existing().id)
+          && (!('reportId' in existing()) || incoming().reportId == existing().reportId);
         allow delete: if isValidId(reportId) && isValidId(photoId);
       }
     }
@@ -81,9 +172,48 @@ service cloud.firestore {
     match /tenants/{tenantId} {
       allow get: if isValidId(tenantId);
       allow list: if true;
-      allow create: if isValidId(tenantId) && isValidTenant(incoming());
-      allow update: if isValidId(tenantId) && isValidTenant(incoming());
-      allow delete: if isValidId(tenantId);
+      allow create: if isValidId(tenantId) && isValidTenant(incoming()) && incoming().id == tenantId;
+      allow update: if isValidId(tenantId)
+        && isValidTenant(incoming())
+        && (!('id' in existing()) || incoming().id == existing().id)
+        && (!('reportsUsed' in existing()) || !('reportsUsed' in incoming()) || incoming().reportsUsed >= existing().reportsUsed);
+      allow delete: if isValidId(tenantId) && (!isSignedIn() || isAdmin());
+    }
+
+    // 4. Platform Seller Settings (WhatsApp, Bank Accounts, QRIS)
+    match /sellerSettings/{settingId} {
+      allow get: if settingId == 'default' && isValidId(settingId);
+      allow list: if false;
+      allow create, update: if settingId == 'default'
+        && isValidId(settingId)
+        && isValidSellerSettings(incoming())
+        && (!isSignedIn() || isAdmin());
+      allow delete: if false;
+    }
+
+    // 5. Customer Payment & Upgrade Proof Requests
+    match /paymentRequests/{requestId} {
+      allow get: if isValidId(requestId);
+      allow list: if true;
+      allow create: if isValidId(requestId)
+        && isValidPaymentRequest(incoming())
+        && incoming().id == requestId
+        && incoming().status == 'pending';
+      allow update: if isValidId(requestId)
+        && isValidPaymentRequest(incoming())
+        && (!('id' in existing()) || incoming().id == existing().id)
+        && (!('tenantId' in existing()) || incoming().tenantId == existing().tenantId)
+        && (existing().status != 'approved' || isAdmin())
+        && (incoming().status == existing().status || !isSignedIn() || isAdmin());
+      allow delete: if isValidId(requestId) && (!isSignedIn() || isAdmin());
+    }
+
+    // 6. Append-Only Security & Database Audit Logs
+    match /securityLogs/{logId} {
+      allow get: if isValidId(logId);
+      allow list: if true;
+      allow create: if isValidId(logId) && isValidSecurityLog(incoming()) && incoming().id == logId;
+      allow update, delete: if false;
     }
   }
 }

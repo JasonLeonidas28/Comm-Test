@@ -25,6 +25,16 @@ import {
   loginOrLinkWithEmail,
   formatFirebaseAuthError,
 } from '../firebase/authService';
+import {
+  verifyAdminPassword,
+  verifyTenantPassword,
+  createPasswordCredentials,
+  stripPlaintextPassword,
+  isAllowlistedOwnerEmail,
+  checkLoginRateLimit,
+  recordLoginAttempt,
+} from '../utils/security';
+import { logSecurityEvent } from '../firebase/securityLogService';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -65,7 +75,23 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       return;
     }
 
-    // 1. Check Owner / Platform Admin login
+    const rateCheck = checkLoginRateLimit(cleanInput);
+    if (!rateCheck.allowed) {
+      setErrorMessage(
+        `Terlalu banyak percobaan login gagal. Coba kembali dalam ${rateCheck.remainingSeconds} detik.`
+      );
+      logSecurityEvent({
+        eventType: 'rate_limit_blocked',
+        severity: 'critical',
+        actorEmail: cleanInput,
+        actorRole: 'anonymous',
+        summary: `Login modal diblokir sementara (${rateCheck.remainingSeconds}s).`,
+      });
+      setIsLoading(false);
+      return;
+    }
+
+    // 1. Check Owner / Platform Admin login (Verified SHA-256)
     if (
       cleanInput === 'voltcheck@admin' ||
       cleanInput === 'voltcheck@admin.com' ||
@@ -74,20 +100,41 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       cleanInput === 'owner' ||
       cleanInput === 'admin'
     ) {
-      if (cleanPassword === 'admin12345678' || cleanPassword === 'admin') {
-        loginOrLinkWithEmail('voltcheck@admin.com', 'admin12345678', 'Admin VoltCheck', true).catch(() => {});
+      const isValidAdmin = await verifyAdminPassword(cleanPassword);
+      if (isValidAdmin) {
+        recordLoginAttempt(cleanInput, true);
+        loginOrLinkWithEmail('voltcheck@admin.com', cleanPassword, 'Admin VoltCheck', true).catch(() => {});
+        logSecurityEvent({
+          eventType: 'login_success',
+          severity: 'info',
+          actorEmail: 'voltcheck@admin.com',
+          actorRole: 'owner',
+          summary: 'Admin berganti/masuk sesi melalui LoginModal.',
+        });
         onLoginSuccess(OWNER_DEFAULT_SESSION);
         setIsLoading(false);
         onClose();
         return;
       } else {
-        setErrorMessage('Kata sandi Admin salah. Gunakan sandi admin12345678.');
+        const failInfo = recordLoginAttempt(cleanInput, false);
+        logSecurityEvent({
+          eventType: 'login_failed',
+          severity: 'warning',
+          actorEmail: cleanInput,
+          actorRole: 'anonymous',
+          summary: 'Percobaan login Admin via modal gagal.',
+        });
+        setErrorMessage(
+          failInfo.lockedNow
+            ? `Kata sandi Admin salah. Dikunci sementara ${failInfo.lockoutSeconds} detik.`
+            : `Kata sandi Admin salah (sisa percobaan: ${failInfo.attemptsLeft}x).`
+        );
         setIsLoading(false);
         return;
       }
     }
 
-    // 2. Check registered customer / tenant (created by admin or pre-existing)
+    // 2. Check registered customer / tenant
     let foundTenant = getRentalTenantByEmailOrCode(cleanInput);
     if (!foundTenant) {
       try {
@@ -101,30 +148,39 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       }
     }
 
-    // If found as registered customer
     if (foundTenant) {
-      const expectedPassword = (foundTenant.password || '').trim();
+      const { valid, needsMigration } = await verifyTenantPassword(cleanPassword, foundTenant);
 
-      // Validate customer password against password set by admin
-      const isPasswordValid =
-        !expectedPassword ||
-        cleanPassword === expectedPassword ||
-        cleanPassword === 'admin12345' ||
-        (cleanInput.includes('bms') && (cleanPassword === 'admin12345' || cleanPassword === 'Voltkytu364'));
-
-      if (!isPasswordValid) {
-        setErrorMessage('Kata sandi salah. Silakan masukkan kata sandi yang telah ditentukan oleh Admin.');
+      if (!valid) {
+        const failInfo = recordLoginAttempt(cleanInput, false);
+        logSecurityEvent({
+          eventType: 'login_failed',
+          severity: 'warning',
+          actorEmail: foundTenant.email,
+          actorRole: 'tenant',
+          targetId: foundTenant.id,
+          summary: `Login modal customer ${foundTenant.companyName} gagal (kata sandi salah).`,
+        });
+        setErrorMessage(
+          failInfo.lockedNow
+            ? `Kata sandi salah. Dikunci sementara ${failInfo.lockoutSeconds} detik.`
+            : `Kata sandi salah (sisa percobaan: ${failInfo.attemptsLeft}x).`
+        );
         setIsLoading(false);
         return;
       }
 
-      // Sync password if customer entered admin12345
-      if (cleanPassword && foundTenant.password !== cleanPassword) {
-        foundTenant.password = cleanPassword;
-        saveRentalTenant(foundTenant);
+      recordLoginAttempt(cleanInput, true);
+
+      if (needsMigration) {
+        try {
+          const creds = await createPasswordCredentials(cleanPassword);
+          const secured = stripPlaintextPassword({ ...foundTenant, ...creds }) as RentalTenant;
+          saveRentalTenant(secured);
+          foundTenant = secured;
+        } catch {}
       }
 
-      // Password matches! Grant session immediately
       const session: AuthSession = {
         role: 'tenant',
         tenantId: foundTenant.id,
@@ -135,14 +191,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         impersonatedByOwner: false,
       };
 
-      // Best-effort Firebase Auth linking in background
       loginOrLinkWithEmail(
         foundTenant.email,
         cleanPassword,
         `${foundTenant.picName} (${foundTenant.shortCode})`,
         true
-      ).catch((fbErr) => {
-        console.info('Firebase Auth session sync note:', fbErr);
+      ).catch(() => {});
+
+      logSecurityEvent({
+        eventType: 'login_success',
+        severity: 'info',
+        actorEmail: foundTenant.email,
+        actorRole: 'tenant',
+        targetId: foundTenant.id,
+        summary: `Customer ${foundTenant.companyName} berganti akun via LoginModal.`,
       });
 
       onLoginSuccess(session);
@@ -169,19 +231,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         cleanInput,
         cleanPassword,
         cleanInput.split('@')[0],
-        true
+        false
       );
 
       const userEmail = (user.email || cleanInput).toLowerCase().trim();
+      recordLoginAttempt(cleanInput, true);
 
-      if (
-        userEmail === 'voltcheck@admin.com' ||
-        userEmail === 'admin@vgreen.id' ||
-        userEmail === 'kerjaanjason@gmail.com' ||
-        userEmail.startsWith('admin@') ||
-        userEmail.includes('voltcheck')
-      ) {
-        onLoginSuccess(OWNER_DEFAULT_SESSION);
+      if (isAllowlistedOwnerEmail(userEmail)) {
+        onLoginSuccess({
+          ...OWNER_DEFAULT_SESSION,
+          userEmail,
+          loginTime: new Date().toISOString(),
+        });
         setIsLoading(false);
         onClose();
         return;
@@ -214,19 +275,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         return;
       }
 
-      const session: AuthSession = {
-        role: 'tenant',
-        tenantId: `tenant-${user.uid.slice(0, 8)}`,
-        tenantName: user.displayName || userEmail.split('@')[0],
-        userEmail: userEmail,
-        userName: user.displayName || userEmail.split('@')[0],
-        loginTime: new Date().toISOString(),
-        impersonatedByOwner: false,
-      };
-      onLoginSuccess(session);
+      setErrorMessage('Akun ini belum terdaftar sebagai penyewa aktif. Silakan keluar dan daftar melalui halaman utama.');
       setIsLoading(false);
-      onClose();
     } catch (err: any) {
+      recordLoginAttempt(cleanInput, false);
       setErrorMessage(formatFirebaseAuthError(err));
       setIsLoading(false);
     }

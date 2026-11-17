@@ -133,7 +133,34 @@ export interface CommissioningReport {
 
   punchlist?: PunchlistItem[];
 
+  fieldTesting?: FieldTestingData;
+
   approval: ApprovalSection;
+}
+
+export interface FieldTestingData {
+  // 3-Phase Voltage & Balance
+  voltageSN?: string;
+  voltageTN?: string;
+  voltageRS?: string;
+  voltageST?: string;
+  voltageRT?: string;
+  // Safety Protection & Insulation
+  rccbRatingMa?: string;
+  rccbTripTimeMs?: string;
+  insulationMohm?: string;
+  panelTempCelsius?: string;
+  // Calibration Instrument
+  instrumentName?: string;
+  instrumentSerial?: string;
+  instrumentCalDate?: string;
+  // K3 & Mechanical Checkboxes
+  torqueChecked?: boolean;
+  k3LotoApplied?: boolean;
+  k3ApdVerified?: boolean;
+  k3FireExtAvailable?: boolean;
+  // Field Technical Notes
+  fieldNotes?: string;
 }
 
 export interface PunchlistItem {

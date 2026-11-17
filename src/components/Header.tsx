@@ -23,7 +23,10 @@ import {
   Crown,
   Database,
   Cloud,
+  WifiOff,
+  RefreshCw,
 } from 'lucide-react';
+import { calculateCommissioningScore } from '../utils/electricalValidation';
 
 interface HeaderProps {
   report: CommissioningReport;
@@ -44,9 +47,13 @@ interface HeaderProps {
   activeTenantName?: string;
   tenantTierName?: string;
   tenantDaysLeft?: number;
-  // Database Cloud controls
+  // Database Cloud & Field Offline Queue controls
   onOpenDatabaseModal?: () => void;
   dbSyncStatus?: 'idle' | 'syncing' | 'synced' | 'error';
+  isOnline?: boolean;
+  offlineQueueCount?: number;
+  isFlushingQueue?: boolean;
+  onFlushOfflineQueue?: () => void;
   // Auth & Rental SaaS controls
   onOpenLogin: () => void;
   onLogout?: () => void;
@@ -79,6 +86,10 @@ export const Header: React.FC<HeaderProps> = ({
   tenantDaysLeft,
   onOpenDatabaseModal,
   dbSyncStatus = 'idle',
+  isOnline = true,
+  offlineQueueCount = 0,
+  isFlushingQueue = false,
+  onFlushOfflineQueue,
   onOpenLogin,
   onLogout,
   onOpenOwnerDashboard,
@@ -90,6 +101,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const percent = Math.round((filledPhotosCount / (totalPhotosCount || 1)) * 100);
   const missingCount = totalPhotosCount - filledPhotosCount;
+  const readiness = calculateCommissioningScore(report);
 
   return (
     <header className="sticky top-0 z-40 bg-white/98 backdrop-blur-md border-b border-slate-200 shadow-xs">
@@ -467,17 +479,65 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </div>
 
-          {/* Audit Progress Bar */}
-          <div className="flex items-center gap-3 text-xs shrink-0 self-end sm:self-center">
-            <span className="font-semibold text-slate-600">Foto:</span>
-            <span className="font-mono font-bold text-emerald-700">
-              {filledPhotosCount}/{totalPhotosCount} ({percent}%)
-            </span>
-            <div className="w-24 md:w-32 h-2 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
-              <div
-                className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-300"
-                style={{ width: `${percent}%` }}
-              />
+          {/* Offline Queue Status & Audit Progress Bar */}
+          <div className="flex items-center gap-2.5 text-xs shrink-0 self-end sm:self-center flex-wrap">
+            {(!isOnline || offlineQueueCount > 0) && (
+              <button
+                type="button"
+                onClick={onFlushOfflineQueue}
+                disabled={!isOnline || isFlushingQueue}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                  !isOnline
+                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                    : 'bg-blue-50 hover:bg-blue-100 text-blue-800 border-blue-300 cursor-pointer'
+                }`}
+                title={
+                  !isOnline
+                    ? 'Sinyal terputus — perubahan tersimpan lokal dan siap dikirim otomatis saat online'
+                    : 'Klik untuk sinkronkan antrean data lapangan ke Cloud Firestore'
+                }
+              >
+                {!isOnline ? (
+                  <WifiOff className="w-3.5 h-3.5 text-amber-600" />
+                ) : (
+                  <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isFlushingQueue ? 'animate-spin' : ''}`} />
+                )}
+                <span>
+                  {!isOnline
+                    ? `Mode Offline${offlineQueueCount > 0 ? ` (${offlineQueueCount} Antre)` : ''}`
+                    : isFlushingQueue
+                    ? 'Menyinkronkan...'
+                    : `Sinkronkan (${offlineQueueCount} Antre)`}
+                </span>
+              </button>
+            )}
+
+            <div className="flex items-center gap-2 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200">
+              <span className="font-semibold text-slate-600">Skor BAST:</span>
+              <span
+                className={`font-mono font-black ${
+                  readiness.totalScore >= 85
+                    ? 'text-emerald-700'
+                    : readiness.totalScore >= 60
+                    ? 'text-blue-700'
+                    : 'text-amber-700'
+                }`}
+              >
+                {readiness.totalScore}%
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-slate-600">Foto:</span>
+              <span className="font-mono font-bold text-emerald-700">
+                {filledPhotosCount}/{totalPhotosCount} ({percent}%)
+              </span>
+              <div className="w-20 md:w-28 h-2 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
+                <div
+                  className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-300"
+                  style={{ width: `${percent}%` }}
+                />
+              </div>
             </div>
           </div>
         </div>

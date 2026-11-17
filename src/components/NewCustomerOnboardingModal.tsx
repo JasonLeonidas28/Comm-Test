@@ -1,7 +1,15 @@
-import React, { useState } from 'react';
-import { RentalTenant, RentalTier, DEFAULT_TIER_FEATURES } from '../types/rental';
+import React, { useState, useEffect } from 'react';
+import { RentalTenant, RentalTier, DEFAULT_TIER_FEATURES, SellerSettings } from '../types/rental';
 import { saveRentalTenant } from '../utils/rentalStorage';
 import { saveTenantToFirestore } from '../firebase/tenantService';
+import {
+  getLocalSellerSettings,
+  getSellerSettingsFromFirestore,
+  subscribeToSellerSettings,
+  compressBillingImage,
+  createOrUpdatePaymentRequest,
+  formatWhatsappNumber,
+} from '../firebase/billingService';
 import {
   Building2,
   ShieldCheck,
@@ -17,6 +25,9 @@ import {
   AlertCircle,
   Crown,
   Lock,
+  Upload,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 interface NewCustomerOnboardingModalProps {
@@ -42,8 +53,20 @@ export const NewCustomerOnboardingModal: React.FC<NewCustomerOnboardingModalProp
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
   const [selectedTier, setSelectedTier] = useState<RentalTier>('trial');
+  const [sellerSettings, setSellerSettings] = useState<SellerSettings>(() => getLocalSellerSettings());
+  const [senderBankOrName, setSenderBankOrName] = useState('');
+  const [proofImage, setProofImage] = useState('');
+  const [isCompressingProof, setIsCompressingProof] = useState(false);
+  const [copiedBank, setCopiedBank] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+
+  useEffect(() => {
+    if (!isOpen) return;
+    getSellerSettingsFromFirestore().then(setSellerSettings).catch(() => {});
+    const unsub = subscribeToSellerSettings(setSellerSettings);
+    return () => unsub();
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -84,16 +107,19 @@ export const NewCustomerOnboardingModal: React.FC<NewCustomerOnboardingModalProp
       const today = new Date();
       const todayStr = today.toISOString().split('T')[0];
       
-      const durationDays = selectedTier === 'trial' ? 7 : 30;
+      const trialDurationDays = 7;
       const endDate = new Date(today);
-      endDate.setDate(endDate.getDate() + durationDays);
+      endDate.setDate(endDate.getDate() + trialDurationDays);
       const endDateStr = endDate.toISOString().split('T')[0];
 
       const cleanCode = (shortCode.trim() || companyName.slice(0, 3)).toUpperCase().replace(/[^A-Z0-9]/g, '');
       const tenantId = `tenant-${Date.now()}`;
 
-      const tierConfig = DEFAULT_TIER_FEATURES[selectedTier];
+      const selectedTierConfig = DEFAULT_TIER_FEATURES[selectedTier];
+      const trialConfig = DEFAULT_TIER_FEATURES.trial;
+      const isPaidChoice = selectedTier !== 'trial';
 
+      // All self-registered new accounts start with Free Trial (1 Token) until payment is verified & approved by Admin
       const newTenant: RentalTenant = {
         id: tenantId,
         companyName: companyName.trim(),
@@ -102,29 +128,53 @@ export const NewCustomerOnboardingModal: React.FC<NewCustomerOnboardingModalProp
         picName: picName.trim() || userDisplayName || 'PIC Pelaksana',
         phone: phone.trim(),
         address: address.trim() || 'Indonesia',
-        tier: selectedTier,
-        tierName: tierConfig.name,
+        tier: 'trial',
+        tierName: isPaidChoice ? `Free Trial 1 Token (Menunggu ACC ${selectedTierConfig.name})` : trialConfig.name,
         status: 'active',
-        rentalFeeMonthly: tierConfig.price,
-        paymentStatus: selectedTier === 'trial' ? 'paid' : 'pending',
+        rentalFeeMonthly: isPaidChoice ? selectedTierConfig.price : 0,
+        paymentStatus: isPaidChoice ? 'pending' : 'paid',
         startDate: todayStr,
         endDate: endDateStr,
-        // Free trial gets exactly 1 token; paid packages get their full quota upon payment approval or 1 token trial right away
-        reportsQuota: selectedTier === 'trial' ? 1 : tierConfig.quota,
+        reportsQuota: 1,
         reportsUsed: 0,
-        features: { ...tierConfig.features },
+        features: { ...trialConfig.features },
         brandColor: 'emerald',
         reportPrefix: `${cleanCode || 'BSS'}-COMM`,
-        notes: `Pendaftaran baru via portal. Paket dipilih: ${tierConfig.name}`,
+        notes: isPaidChoice
+          ? `Pendaftaran baru via portal. Mengajukan paket: ${selectedTierConfig.name}`
+          : `Pendaftaran baru via portal. Paket dipilih: ${trialConfig.name}`,
         createdAt: today.toISOString(),
         updatedAt: today.toISOString(),
       };
 
-      // 1. Save to local storage
+      // 1. Save to local storage & Firestore Cloud Database
       saveRentalTenant(newTenant);
-
-      // 2. Persist to Firestore Cloud Database
       await saveTenantToFirestore(newTenant);
+
+      // 2. If customer chose a paid tier (and especially if proof was uploaded), record PaymentRequest for 1-click Admin ACC
+      if (isPaidChoice && proofImage) {
+        await createOrUpdatePaymentRequest({
+          id: `pay-${Date.now()}`,
+          tenantId: newTenant.id,
+          companyName: newTenant.companyName,
+          shortCode: newTenant.shortCode,
+          picName: newTenant.picName,
+          phone: newTenant.phone,
+          email: newTenant.email,
+          requestType: 'activation',
+          currentTier: 'trial',
+          requestedTier: selectedTier,
+          requestedTierName: selectedTierConfig.name,
+          durationMonths: 1,
+          amount: selectedTierConfig.price,
+          senderBankOrName: senderBankOrName.trim() || newTenant.companyName,
+          proofImage,
+          notes: 'Bukti bayar diunggah saat registrasi akun baru.',
+          status: 'pending',
+          createdAt: today.toISOString(),
+          updatedAt: today.toISOString(),
+        });
+      }
 
       // 3. Complete onboarding
       onComplete(newTenant);
@@ -136,19 +186,35 @@ export const NewCustomerOnboardingModal: React.FC<NewCustomerOnboardingModalProp
     }
   };
 
+  const handleProofFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErrorMessage('');
+    setIsCompressingProof(true);
+    try {
+      const compressed = await compressBillingImage(file, 1000, 0.72);
+      setProofImage(compressed);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal memproses foto bukti transfer.');
+    } finally {
+      setIsCompressingProof(false);
+    }
+  };
+
   const handleContactAdminWA = () => {
+    const adminWa = formatWhatsappNumber(sellerSettings.adminWhatsapp);
     const tierName = DEFAULT_TIER_FEATURES[selectedTier].name;
     const priceFormatted = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(
       DEFAULT_TIER_FEATURES[selectedTier].price
     );
     const text = encodeURIComponent(
-      `Halo Pengelola VoltCheck System,\n\nSaya ${picName || userDisplayName} dari ${companyName || 'Perusahaan Baru'} ingin mendaftar dan berlangganan:\n` +
+      `Halo ${sellerSettings.businessName || 'Pengelola VoltCheck System'},\n\nSaya ${picName || userDisplayName} dari ${companyName || 'Perusahaan Baru'} ingin mendaftar dan berlangganan:\n` +
       `• Paket: ${tierName} (${priceFormatted})\n` +
       `• Email Terdaftar: ${userEmail}\n` +
       `• No. WhatsApp: ${phone}\n\n` +
       `Mohon info instruksi pembayaran / aktivasi kuota. Terima kasih!`
     );
-    window.open(`https://wa.me/6281234567890?text=${text}`, '_blank');
+    window.open(`https://wa.me/${adminWa}?text=${text}`, '_blank');
   };
 
   return (
@@ -478,25 +544,83 @@ export const NewCustomerOnboardingModal: React.FC<NewCustomerOnboardingModalProp
             </div>
           </div>
 
-          {/* Paid Tier Notice & WA Payment option */}
+          {/* Paid Tier Notice, Bank Details & Proof Upload */}
           {selectedTier !== 'trial' && (
-            <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-2xl text-xs space-y-2">
-              <div className="flex items-center justify-between">
+            <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-xs space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-bold text-amber-300 flex items-center gap-1.5">
                   <Clock className="w-4 h-4 text-amber-400" />
-                  Konfirmasi Pembayaran Paket Berbayar
+                  Pembayaran Paket {DEFAULT_TIER_FEATURES[selectedTier].name} — Rp{' '}
+                  {DEFAULT_TIER_FEATURES[selectedTier].price.toLocaleString('id-ID')}
                 </span>
                 <button
                   type="button"
                   onClick={handleContactAdminWA}
-                  className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] rounded-lg flex items-center gap-1 transition-colors"
+                  className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] rounded-lg flex items-center gap-1 transition-colors cursor-pointer"
                 >
                   <MessageSquare className="w-3.5 h-3.5" />
                   Hubungi Pengelola via WA
                 </button>
               </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-900/80 p-3 rounded-xl border border-slate-800">
+                <div>
+                  <div className="text-[10px] uppercase text-slate-400 font-bold">
+                    Transfer ke {sellerSettings.bankPrimaryName || 'Rekening Resmi'}
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="font-mono font-bold text-white text-sm">
+                      {sellerSettings.bankPrimaryAccount || 'Hubungi Admin via WA'}
+                    </span>
+                    {sellerSettings.bankPrimaryAccount && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(sellerSettings.bankPrimaryAccount);
+                          setCopiedBank(true);
+                          setTimeout(() => setCopiedBank(false), 2000);
+                        }}
+                        className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        {copiedBank ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                        {copiedBank ? 'Disalin' : 'Salin'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    a/n <strong className="text-slate-200">{sellerSettings.bankPrimaryHolder || '-'}</strong>
+                  </div>
+                  {sellerSettings.bankSecondaryAccount && (
+                    <div className="text-[11px] text-slate-400 mt-1">
+                      Alternatif: {sellerSettings.bankSecondaryName} <span className="font-mono text-slate-200">{sellerSettings.bankSecondaryAccount}</span> (a/n {sellerSettings.bankSecondaryHolder})
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={senderBankOrName}
+                    onChange={(e) => setSenderBankOrName(e.target.value)}
+                    placeholder="Nama Pengirim / Bank (jika sudah transfer)"
+                    className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-white text-[11px] placeholder:text-slate-600 focus:outline-none focus:border-emerald-500"
+                  />
+                  <label className="flex items-center justify-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 rounded-lg font-bold text-[11px] cursor-pointer transition-colors">
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>
+                      {isCompressingProof
+                        ? 'Memproses foto...'
+                        : proofImage
+                        ? '✓ Bukti Transfer Terlampir (Klik untuk Ganti)'
+                        : 'Upload Bukti Transfer (Opsional)'}
+                    </span>
+                    <input type="file" accept="image/*" onChange={handleProofFileChange} className="hidden" />
+                  </label>
+                </div>
+              </div>
+
               <p className="text-slate-400 text-[11px]">
-                Untuk paket {DEFAULT_TIER_FEATURES[selectedTier].name}, akun Anda akan langsung aktif dengan <strong>1 Token Free Trial</strong> untuk inspeksi pertama saat menunggu verifikasi pembayaran oleh Admin.
+                Setelah daftar, akun Anda langsung aktif dengan <strong>1 Token Free Trial</strong> untuk mencoba aplikasi sambil menunggu verifikasi & ACC pembayaran oleh Admin.
               </p>
             </div>
           )}

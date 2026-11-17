@@ -1,7 +1,22 @@
-import React, { useState } from 'react';
-import { RentalTenant, AuthSession } from '../types/rental';
+import React, { useState, useEffect } from 'react';
+import { RentalTenant, AuthSession, SellerSettings, PaymentRequest } from '../types/rental';
 import { CommissioningReport } from '../types/report';
 import { getDaysRemaining } from '../utils/rentalStorage';
+import {
+  getLocalSellerSettings,
+  getSellerSettingsFromFirestore,
+  subscribeToSellerSettings,
+  getLocalPaymentRequests,
+  getAllPaymentRequestsFromFirestore,
+  subscribeToPaymentRequests,
+  formatWhatsappNumber,
+} from '../firebase/billingService';
+import { UpgradePaymentModal } from './UpgradePaymentModal';
+import {
+  calculateCommissioningScore,
+  evaluateElectricalStatus,
+} from '../utils/electricalValidation';
+import { exportAllReportsMasterCSV } from '../utils/exportUtils';
 import {
   Building2,
   Clock,
@@ -21,6 +36,11 @@ import {
   ExternalLink,
   Search,
   Sparkles,
+  CreditCard,
+  Upload,
+  FileSpreadsheet,
+  MapPin,
+  Activity,
 } from 'lucide-react';
 
 interface TenantDashboardPageProps {
@@ -50,11 +70,36 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showLimitsModal, setShowLimitsModal] = useState(false);
+  const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
+  const [sellerSettings, setSellerSettings] = useState<SellerSettings>(() => getLocalSellerSettings());
+  const [paymentRequests, setPaymentRequests] = useState<PaymentRequest[]>(() =>
+    getLocalPaymentRequests().filter((r) => r.tenantId === tenant.id)
+  );
+
+  useEffect(() => {
+    getSellerSettingsFromFirestore().then(setSellerSettings).catch(() => {});
+    const unsubSettings = subscribeToSellerSettings(setSellerSettings);
+
+    getAllPaymentRequestsFromFirestore()
+      .then((all) => setPaymentRequests(all.filter((r) => r.tenantId === tenant.id)))
+      .catch(() => {});
+    const unsubPayments = subscribeToPaymentRequests((all) => {
+      setPaymentRequests(all.filter((r) => r.tenantId === tenant.id));
+    });
+
+    return () => {
+      unsubSettings();
+      unsubPayments();
+    };
+  }, [tenant.id]);
 
   const daysLeft = getDaysRemaining(tenant.endDate);
   const isExpired = tenant.status === 'expired' || daysLeft <= 0;
   const isSuspended = tenant.status === 'suspended';
   const isQuotaFull = tenant.reportsQuota !== -1 && tenant.reportsUsed >= tenant.reportsQuota;
+
+  const latestPayment = paymentRequests[0];
+  const hasPendingPayment = paymentRequests.some((p) => p.status === 'pending');
 
   // Filter reports
   const filteredReports = reports.filter((r) => {
@@ -65,17 +110,33 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
     return name.includes(query) || code.includes(query) || vendor.includes(query);
   });
 
+  // Portfolio analytics KPIs
+  const totalStations = reports.length;
+  const passedPuilCount = reports.filter(
+    (r) => evaluateElectricalStatus(r).status === 'PASSED'
+  ).length;
+  const avgReadinessScore =
+    reports.length > 0
+      ? Math.round(
+          reports.reduce((acc, r) => acc + calculateCommissioningScore(r).totalScore, 0) /
+            reports.length
+        )
+      : 0;
+  const totalOpenPunchlists = reports.reduce(
+    (acc, r) => acc + (r.punchlist?.filter((p) => p.status !== 'Resolved').length || 0),
+    0
+  );
+
   const handleContactSellerWA = () => {
-    const cleanPhone = tenant.phone.replace(/[^0-9]/g, '');
-    const phoneFormatted = cleanPhone.startsWith('0') ? '62' + cleanPhone.slice(1) : cleanPhone;
+    const adminWa = formatWhatsappNumber(sellerSettings.adminWhatsapp);
     const message = encodeURIComponent(
-      `Halo Pengelola VoltCheck System,\n\nSaya dari ${tenant.companyName} ingin konfirmasi perpanjangan sewa / upgrade fitur aplikasi:\n` +
+      `Halo ${sellerSettings.businessName || 'Pengelola VoltCheck System'},\n\nSaya dari ${tenant.companyName} (${tenant.shortCode}) ingin konfirmasi perpanjangan sewa / upgrade fitur aplikasi:\n` +
         `• Paket: ${tenant.tierName}\n` +
         `• Status: ${isExpired ? 'Habis (Expired)' : `Tersisa ${daysLeft} hari`}\n` +
         `• Kuota: ${tenant.reportsUsed}/${tenant.reportsQuota === -1 ? 'Unlimited' : tenant.reportsQuota} laporan\n\n` +
-        `Mohon info perpanjangan dan nomor rekening. Terima kasih!`
+        `Mohon info perpanjangan dan rekening pembayaran. Terima kasih!`
     );
-    window.open(`https://wa.me/6281234567890?text=${message}`, '_blank');
+    window.open(`https://wa.me/${adminWa}?text=${message}`, '_blank');
   };
 
   return (
@@ -114,11 +175,11 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
 
             <button
               type="button"
-              onClick={handleContactSellerWA}
-              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-sm flex items-center gap-1.5 transition-colors"
+              onClick={() => setIsUpgradeModalOpen(true)}
+              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
             >
-              <MessageSquare className="w-3.5 h-3.5" />
-              Perpanjang Sewa
+              <CreditCard className="w-3.5 h-3.5" />
+              <span>{hasPendingPayment ? 'Status Pembayaran (Menunggu ACC)' : 'Upgrade / Upload Bukti Bayar'}</span>
             </button>
 
             {session.impersonatedByOwner && onSwitchToOwner ? (
@@ -162,11 +223,11 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
             </div>
             <button
               type="button"
-              onClick={handleContactSellerWA}
+              onClick={() => setIsUpgradeModalOpen(true)}
               className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shrink-0 flex items-center gap-1.5 shadow-md cursor-pointer"
             >
-              <MessageSquare className="w-4 h-4" />
-              Perpanjang Sekarang via WhatsApp
+              <Upload className="w-4 h-4" />
+              Perpanjang & Upload Bukti Bayar
             </button>
           </div>
         ) : isSuspended ? (
@@ -220,12 +281,77 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
                 </div>
                 <button
                   type="button"
-                  onClick={handleContactSellerWA}
+                  onClick={() => setIsUpgradeModalOpen(true)}
                   className="px-4 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white font-black text-xs rounded-xl shrink-0 flex items-center gap-2 shadow-md shadow-emerald-900/30 cursor-pointer transition-transform hover:scale-[1.02]"
                 >
                   <Sparkles className="w-4 h-4 text-amber-200" />
-                  <span>Upgrade Paket Berbayar</span>
+                  <span>Upgrade Paket & Upload Bukti Bayar</span>
                 </button>
+              </div>
+            )}
+
+            {/* Payment Verification Status Banner */}
+            {latestPayment && (latestPayment.status === 'pending' || latestPayment.status === 'rejected') && (
+              <div
+                className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                  latestPayment.status === 'pending'
+                    ? 'bg-blue-950/60 border-blue-700/70 text-blue-100'
+                    : 'bg-rose-950/60 border-rose-700/70 text-rose-100'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`p-2.5 rounded-xl shrink-0 ${
+                      latestPayment.status === 'pending'
+                        ? 'bg-blue-900/80 text-blue-300'
+                        : 'bg-rose-900/80 text-rose-300'
+                    }`}
+                  >
+                    <CreditCard className="w-5 h-5" />
+                  </span>
+                  <div className="text-xs">
+                    <div className="font-bold text-white flex items-center gap-2 flex-wrap">
+                      <span>
+                        {latestPayment.status === 'pending'
+                          ? `Pembayaran Paket ${latestPayment.requestedTierName} (${latestPayment.durationMonths} Bln) Sedang Diverifikasi Admin`
+                          : `Pengajuan Pembayaran ${latestPayment.requestedTierName} Ditolak`}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          latestPayment.status === 'pending'
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                            : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                        }`}
+                      >
+                        {latestPayment.status === 'pending' ? 'Menunggu ACC Admin' : 'Ditolak'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] opacity-85 mt-0.5">
+                      {latestPayment.status === 'pending'
+                        ? `Total: Rp ${latestPayment.amount.toLocaleString('id-ID')} • Pengirim: ${latestPayment.senderBankOrName || '-'}`
+                        : `Alasan: ${latestPayment.rejectionReason || 'Bukti transfer tidak valid. Silakan kirim ulang.'}`}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {latestPayment.status === 'rejected' && (
+                    <button
+                      type="button"
+                      onClick={() => setIsUpgradeModalOpen(true)}
+                      className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl cursor-pointer"
+                    >
+                      Upload Ulang Bukti
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleContactSellerWA}
+                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Konfirmasi via WA
+                  </button>
+                </div>
               </div>
             )}
 
@@ -291,6 +417,40 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
           </>
         )}
 
+        {/* Portfolio Analytics KPI Bar */}
+        {!isExpired && !isSuspended && (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <span className="text-[11px] font-semibold text-slate-400 block">Total Stasiun Terdaftar</span>
+              <div className="text-2xl font-black text-white font-mono mt-1">{totalStations}</div>
+              <span className="text-[10px] text-slate-500">Unit proyek commissioning</span>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <span className="text-[11px] font-semibold text-slate-400 block">Lolos Standar PUIL</span>
+              <div className="text-2xl font-black text-emerald-400 font-mono mt-1">
+                {passedPuilCount} <span className="text-xs font-normal text-slate-500">/ {totalStations}</span>
+              </div>
+              <span className="text-[10px] text-emerald-500/80">Grounding & tegangan aman</span>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <span className="text-[11px] font-semibold text-slate-400 block">Rata-rata Skor BAST</span>
+              <div className="text-2xl font-black text-cyan-400 font-mono mt-1">{avgReadinessScore}%</div>
+              <span className="text-[10px] text-slate-500">Kesiapan foto, uji & TTD</span>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <span className="text-[11px] font-semibold text-slate-400 block">Punchlist Terbuka</span>
+              <div
+                className={`text-2xl font-black font-mono mt-1 ${
+                  totalOpenPunchlists > 0 ? 'text-amber-400' : 'text-emerald-400'
+                }`}
+              >
+                {totalOpenPunchlists}
+              </div>
+              <span className="text-[10px] text-slate-500">Temuan lapangan belum selesai</span>
+            </div>
+          </div>
+        )}
+
         {/* Reports Header & Search Toolbar */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
           <div>
@@ -300,15 +460,30 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
             </p>
           </div>
 
-          <div className="relative w-full sm:w-72">
-            <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Cari nama stasiun atau lokasi..."
-              className="w-full pl-9 pr-3 py-2 text-xs bg-slate-900 border border-slate-800 rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-emerald-500"
-            />
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <button
+              type="button"
+              disabled={reports.length === 0}
+              onClick={() =>
+                exportAllReportsMasterCSV(reports, tenant.shortCode || tenant.companyName)
+              }
+              className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-emerald-400 border border-slate-800 hover:border-emerald-700 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0"
+              title="Ekspor rekap seluruh stasiun ke format Excel (.CSV)"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Ekspor Master Excel</span>
+            </button>
+
+            <div className="relative w-full sm:w-64">
+              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Cari nama stasiun atau lokasi..."
+                className="w-full pl-9 pr-3 py-2 text-xs bg-slate-900 border border-slate-800 rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
           </div>
         </div>
 
@@ -329,15 +504,25 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
             </div>
           ) : (
             filteredReports.map((rep) => {
-              const totalPhotos = 34;
-              let filled = 0;
-              Object.values(rep.bssVisual || {}).forEach((i) => i.imageData && filled++);
-              Object.values(rep.simCardVisual || {}).forEach((i) => i.imageData && filled++);
-              Object.values(rep.groundingVisual || {}).forEach((i) => i.imageData && filled++);
-              Object.values(rep.kwhAndPanelVisual || {}).forEach((i) => i.imageData && filled++);
-              Object.values(rep.cablesVisual || {}).forEach((i) => i.imageData && filled++);
-              const pct = Math.round((filled / totalPhotos) * 100);
+              const score = calculateCommissioningScore(rep);
+              const verdict = evaluateElectricalStatus(rep);
+              const openPunchCount =
+                rep.punchlist?.filter((p) => p.status !== 'Resolved').length || 0;
               const isSigned = Boolean(rep.approval?.preparedBy?.signatureImage);
+              const mapsUrl =
+                rep.generalInfo.gmapsLink ||
+                (rep.generalInfo.plantCoordinate
+                  ? `https://maps.google.com/?q=${encodeURIComponent(rep.generalInfo.plantCoordinate)}`
+                  : '');
+
+              const puilBadgeClass =
+                verdict.status === 'PASSED'
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  : verdict.status === 'WARNING'
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : verdict.status === 'FAILED'
+                  ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                  : 'bg-slate-800 text-slate-400 border-slate-700';
 
               return (
                 <div
@@ -358,17 +543,47 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
                       Alamat: {rep.generalInfo.plantAddress || 'Alamat belum diatur'}
                     </p>
 
+                    {/* Status badges row */}
+                    <div className="flex items-center gap-1.5 flex-wrap mt-3">
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded border ${puilBadgeClass}`}
+                      >
+                        <Activity className="w-3 h-3" />
+                        PUIL: {verdict.status}
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/25 font-mono">
+                        BAST {score.totalScore}%
+                      </span>
+                      {openPunchCount > 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                          {openPunchCount} Punchlist
+                        </span>
+                      )}
+                      {mapsUrl && (
+                        <a
+                          href={mapsUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
+                          title="Buka koordinat lokasi di Google Maps"
+                        >
+                          <MapPin className="w-3 h-3 text-rose-400" />
+                          Maps
+                        </a>
+                      )}
+                    </div>
+
                     <div className="mt-4 space-y-2 text-xs">
                       <div className="flex items-center justify-between text-slate-400">
                         <span>Kelengkapan Foto:</span>
                         <span className="font-mono text-white font-bold">
-                          {filled} / {totalPhotos} ({pct}%)
+                          {score.filledPhotos} / {score.totalPhotos} ({Math.round((score.filledPhotos / score.totalPhotos) * 100)}%)
                         </span>
                       </div>
                       <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-emerald-500 rounded-full transition-all"
-                          style={{ width: `${pct}%` }}
+                          style={{ width: `${Math.round((score.filledPhotos / score.totalPhotos) * 100)}%` }}
                         />
                       </div>
 
@@ -537,18 +752,28 @@ export const TenantDashboardPage: React.FC<TenantDashboardPageProps> = ({
                   type="button"
                   onClick={() => {
                     setShowLimitsModal(false);
-                    handleContactSellerWA();
+                    setIsUpgradeModalOpen(true);
                   }}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold flex items-center gap-1.5"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold flex items-center gap-1.5 cursor-pointer"
                 >
-                  <MessageSquare className="w-3.5 h-3.5" />
-                  Upgrade Fitur
+                  <CreditCard className="w-3.5 h-3.5" />
+                  Upgrade & Upload Bukti Bayar
                 </button>
               </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* Upgrade & Upload Payment Proof Modal */}
+      <UpgradePaymentModal
+        isOpen={isUpgradeModalOpen}
+        onClose={() => setIsUpgradeModalOpen(false)}
+        tenant={tenant}
+        onSubmitted={(req) => {
+          setPaymentRequests((prev) => [req, ...prev.filter((p) => p.id !== req.id)]);
+        }}
+      />
     </div>
   );
 };

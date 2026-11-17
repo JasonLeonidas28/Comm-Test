@@ -8,6 +8,7 @@ import {
   onSnapshot,
   query,
   orderBy,
+  where,
   writeBatch,
 } from 'firebase/firestore';
 import { db, auth } from './config';
@@ -187,19 +188,25 @@ export async function getReportFromFirestore(
 }
 
 /**
- * Fetches all reports from Firestore with their photos.
+ * Fetches reports from Firestore with their photos (scoped to tenantId when provided).
  */
-export async function getAllReportsFromFirestore(): Promise<CommissioningReport[]> {
+export async function getAllReportsFromFirestore(tenantId?: string): Promise<CommissioningReport[]> {
   const path = REPORTS_COLLECTION;
   let snapshot;
 
   try {
-    const q = query(collection(db, REPORTS_COLLECTION), orderBy('updatedAt', 'desc'));
+    const q = tenantId
+      ? query(collection(db, REPORTS_COLLECTION), where('tenantId', '==', tenantId))
+      : query(collection(db, REPORTS_COLLECTION), orderBy('updatedAt', 'desc'));
     snapshot = await getDocs(q);
   } catch (error) {
     // Fallback without orderBy if index is still pending
     try {
-      snapshot = await getDocs(collection(db, REPORTS_COLLECTION));
+      snapshot = await getDocs(
+        tenantId
+          ? query(collection(db, REPORTS_COLLECTION), where('tenantId', '==', tenantId))
+          : collection(db, REPORTS_COLLECTION)
+      );
     } catch (fallbackError) {
       handleFirestoreError(fallbackError, OperationType.LIST, path);
     }
@@ -215,18 +222,22 @@ export async function getAllReportsFromFirestore(): Promise<CommissioningReport[
     }
   }
 
+  reports.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
   return reports;
 }
 
 /**
- * Subscribes to real-time updates of the reports collection.
+ * Subscribes to real-time updates of the reports collection (scoped to tenantId when provided).
  */
 export function subscribeToReports(
   onUpdate: (reports: CommissioningReport[]) => void,
-  onError?: (err: Error) => void
+  onError?: (err: Error) => void,
+  tenantId?: string
 ) {
   const path = REPORTS_COLLECTION;
-  const colRef = collection(db, REPORTS_COLLECTION);
+  const colRef = tenantId
+    ? query(collection(db, REPORTS_COLLECTION), where('tenantId', '==', tenantId))
+    : collection(db, REPORTS_COLLECTION);
 
   return onSnapshot(
     colRef,
@@ -240,6 +251,7 @@ export function subscribeToReports(
           console.warn('Error hydrating real-time report doc', d.id, e);
         }
       }
+      reports.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
       onUpdate(reports);
     },
     (error) => {

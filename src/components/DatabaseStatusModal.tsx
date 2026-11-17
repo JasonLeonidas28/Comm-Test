@@ -306,6 +306,28 @@ export const DatabaseStatusModal: React.FC<DatabaseStatusModalProps> = ({
             </div>
           </div>
 
+          {/* Data & Database Security Safeguards */}
+          <div className="p-4 rounded-2xl border border-emerald-200 bg-emerald-50/50 space-y-2">
+            <div className="font-bold text-emerald-950 flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-600" />
+              Keamanan Data &amp; Database Aktif
+            </div>
+            <ul className="space-y-1 text-[11px] text-emerald-900">
+              <li className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>Enkripsi kredensial SHA-256 + salt acak (nol sandi teks terbuka di Firestore)</span>
+              </li>
+              <li className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>Isolasi data multi-tenant per <code className="font-mono">tenantId</code> &amp; sesi terisolasi</span>
+              </li>
+              <li className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>Validasi Firestore Rules ketat, pembatasan ukuran payload, &amp; log audit append-only</span>
+              </li>
+            </ul>
+          </div>
+
           {/* Live Status Feedback Message */}
           {statusMessage && (
             <div className="p-3 rounded-xl bg-slate-100 border border-slate-300 text-slate-800 text-xs flex items-center gap-2 animate-fade-in">

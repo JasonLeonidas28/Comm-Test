@@ -17,7 +17,10 @@ export interface RentalTenant {
   companyName: string;
   shortCode: string;
   email: string;
-  password?: string;
+  password?: string;             // Transient only in memory during form creation; stripped before Firestore persistence
+  passwordHash?: string;         // Salted SHA-256 digest
+  passwordSalt?: string;         // Per-tenant random hex salt
+  passwordUpdatedAt?: string;
   picName: string;
   phone: string;                  // WhatsApp
   address: string;
@@ -139,3 +142,87 @@ export const DEFAULT_TIER_FEATURES: Record<RentalTier, { name: string; price: nu
     },
   },
 };
+
+export interface SellerSettings {
+  id: string; // 'default'
+  businessName: string;
+  adminWhatsapp: string;
+  bankPrimaryName: string;
+  bankPrimaryAccount: string;
+  bankPrimaryHolder: string;
+  bankSecondaryName?: string;
+  bankSecondaryAccount?: string;
+  bankSecondaryHolder?: string;
+  qrisImage?: string;
+  paymentNotes?: string;
+  updatedAt: string;
+}
+
+export const DEFAULT_SELLER_SETTINGS: SellerSettings = {
+  id: 'default',
+  businessName: 'VoltCheck Commissioning Platform',
+  adminWhatsapp: '6281234567890',
+  bankPrimaryName: 'Bank BCA',
+  bankPrimaryAccount: 'Belum diatur (Edit di Pengaturan Penjual)',
+  bankPrimaryHolder: 'Pengelola VoltCheck',
+  bankSecondaryName: '',
+  bankSecondaryAccount: '',
+  bankSecondaryHolder: '',
+  qrisImage: '',
+  paymentNotes: 'Mohon sertakan nama perusahaan pada berita transfer untuk mempercepat verifikasi.',
+  updatedAt: new Date().toISOString(),
+};
+
+export type PaymentRequestStatus = 'pending' | 'approved' | 'rejected';
+
+export interface PaymentRequest {
+  id: string;
+  tenantId: string;
+  companyName: string;
+  shortCode: string;
+  picName: string;
+  phone: string;
+  email: string;
+  requestType: 'upgrade' | 'renewal' | 'activation';
+  currentTier: RentalTier;
+  requestedTier: RentalTier;
+  requestedTierName: string;
+  durationMonths: number;
+  amount: number;
+  senderBankOrName: string;
+  proofImage: string;
+  notes?: string;
+  status: PaymentRequestStatus;
+  rejectionReason?: string;
+  processedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SecurityLogSeverity = 'info' | 'warning' | 'critical';
+
+export type SecurityLogEventType =
+  | 'login_success'
+  | 'login_failed'
+  | 'rate_limit_blocked'
+  | 'password_updated'
+  | 'password_migration'
+  | 'tenant_created'
+  | 'tenant_deleted'
+  | 'payment_approved'
+  | 'payment_rejected'
+  | 'settings_updated'
+  | 'report_deleted';
+
+export interface SecurityLog {
+  id: string;
+  eventType: SecurityLogEventType;
+  severity: SecurityLogSeverity;
+  actorEmail: string;
+  actorRole: 'owner' | 'tenant' | 'system' | 'anonymous';
+  targetId?: string;
+  summary: string;
+  createdAt: string;
+}
+
+

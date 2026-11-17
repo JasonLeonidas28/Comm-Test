@@ -1,5 +1,13 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { RentalTenant, RentalTier, RentalStatus, DEFAULT_TIER_FEATURES } from '../types/rental';
+import {
+  RentalTenant,
+  RentalTier,
+  RentalStatus,
+  DEFAULT_TIER_FEATURES,
+  SellerSettings,
+  PaymentRequest,
+  SecurityLog,
+} from '../types/rental';
 import { CommissioningReport } from '../types/report';
 import {
   getRentalTenants,
@@ -10,8 +18,32 @@ import {
   toggleTenantStatus,
   getDaysRemaining,
   getDeletedTenantIds,
+  migrateLegacyTenantPasswords,
 } from '../utils/rentalStorage';
 import { getAllTenantsFromFirestore, subscribeToTenants } from '../firebase/tenantService';
+import {
+  createPasswordCredentials,
+  stripPlaintextPassword,
+} from '../utils/security';
+import {
+  getLocalSecurityLogs,
+  getSecurityLogsFromFirestore,
+  subscribeToSecurityLogs,
+  logSecurityEvent,
+} from '../firebase/securityLogService';
+import {
+  getLocalSellerSettings,
+  getSellerSettingsFromFirestore,
+  saveSellerSettings,
+  subscribeToSellerSettings,
+  getLocalPaymentRequests,
+  getAllPaymentRequestsFromFirestore,
+  subscribeToPaymentRequests,
+  approvePaymentRequest,
+  rejectPaymentRequest,
+  compressBillingImage,
+  formatWhatsappNumber,
+} from '../firebase/billingService';
 import {
   Building2,
   Users,
@@ -45,6 +77,12 @@ import {
   Eye,
   EyeOff,
   Sparkles,
+  Settings,
+  Upload,
+  XCircle,
+  ShieldCheck,
+  ShieldAlert,
+  History,
 } from 'lucide-react';
 
 interface OwnerDashboardPageProps {
@@ -81,9 +119,32 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
   onOpenDatabaseModal,
 }) => {
   const [tenants, setTenants] = useState<RentalTenant[]>(() => getRentalTenants());
-  const [activeTab, setActiveTab] = useState<'tenants' | 'reports' | 'tiers' | 'invoice'>('tenants');
+  const [activeTab, setActiveTab] = useState<'tenants' | 'payments' | 'reports' | 'tiers' | 'invoice' | 'settings' | 'security'>('tenants');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'expiring' | 'expired' | 'suspended'>('all');
+
+  // Seller Settings & Payment Verification state
+  const [sellerSettings, setSellerSettings] = useState<SellerSettings>(() => getLocalSellerSettings());
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isCompressingQris, setIsCompressingQris] = useState(false);
+  const [paymentRequests, setPaymentRequests] = useState<PaymentRequest[]>(() => getLocalPaymentRequests());
+  const [isProcessingPaymentId, setIsProcessingPaymentId] = useState<string | null>(null);
+  const [previewProofUrl, setPreviewProofUrl] = useState<string | null>(null);
+  const [rejectingRequest, setRejectingRequest] = useState<PaymentRequest | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+
+  // Security & Audit Trail state
+  const [securityLogs, setSecurityLogs] = useState<SecurityLog[]>(() => getLocalSecurityLogs());
+  const [securitySeverityFilter, setSecuritySeverityFilter] = useState<'all' | 'critical' | 'warning' | 'info'>('all');
+  const [isMigratingPasswords, setIsMigratingPasswords] = useState(false);
+  const [lastIssuedCredential, setLastIssuedCredential] = useState<{
+    companyName: string;
+    picName: string;
+    phone: string;
+    email: string;
+    password: string;
+    tierName: string;
+  } | null>(null);
 
   // Modal State for Add / Edit Tenant
   const [editingTenant, setEditingTenant] = useState<RentalTenant | null>(null);
@@ -109,7 +170,12 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
     setTenants(getRentalTenants());
   };
 
-  // Sync and subscribe to Firestore Cloud Database tenants in real-time
+  const pendingPaymentsCount = useMemo(
+    () => paymentRequests.filter((r) => r.status === 'pending').length,
+    [paymentRequests]
+  );
+
+  // Sync and subscribe to Firestore Cloud Database tenants, settings, and payment requests in real-time
   useEffect(() => {
     let isMounted = true;
 
@@ -133,7 +199,19 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
         console.warn('Initial Firestore tenant sync notice:', err);
       });
 
-    // 2. Real-time subscription to tenants collection
+    getSellerSettingsFromFirestore()
+      .then((s) => {
+        if (isMounted) setSellerSettings(s);
+      })
+      .catch(() => {});
+
+    getAllPaymentRequestsFromFirestore()
+      .then((reqs) => {
+        if (isMounted) setPaymentRequests(reqs);
+      })
+      .catch(() => {});
+
+    // 2. Real-time subscriptions
     const unsub = subscribeToTenants(
       (cloudTenants) => {
         if (!isMounted) return;
@@ -151,11 +229,120 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
       }
     );
 
+    const unsubSettings = subscribeToSellerSettings((s) => {
+      if (isMounted) setSellerSettings(s);
+    });
+
+    const unsubPayments = subscribeToPaymentRequests((reqs) => {
+      if (isMounted) setPaymentRequests(reqs);
+    });
+
+    getSecurityLogsFromFirestore(60)
+      .then((logs) => {
+        if (isMounted) setSecurityLogs(logs);
+      })
+      .catch(() => {});
+
+    const unsubSecurity = subscribeToSecurityLogs((logs) => {
+      if (isMounted) setSecurityLogs(logs);
+    }, 60);
+
     return () => {
       isMounted = false;
       unsub();
+      unsubSettings();
+      unsubPayments();
+      unsubSecurity();
     };
   }, []);
+
+  const handleSaveSellerSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingSettings(true);
+    try {
+      const saved = await saveSellerSettings(sellerSettings);
+      setSellerSettings(saved);
+      logSecurityEvent({
+        eventType: 'settings_updated',
+        severity: 'warning',
+        actorEmail: 'voltcheck@admin.com',
+        actorRole: 'owner',
+        targetId: 'default',
+        summary: `Admin memperbarui Pengaturan WA (${saved.adminWhatsapp}) & Rekening Penjual (${saved.bankPrimaryName}).`,
+      });
+      showToast('Pengaturan Nomor WhatsApp & Rekening Penjual berhasil disimpan ke Cloud!');
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal menyimpan pengaturan penjual.');
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  const handleQrisUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsCompressingQris(true);
+    try {
+      const compressed = await compressBillingImage(file, 800, 0.75);
+      setSellerSettings((prev) => ({ ...prev, qrisImage: compressed }));
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal memproses gambar QRIS.');
+    } finally {
+      setIsCompressingQris(false);
+    }
+  };
+
+  const handleApprovePayment = async (req: PaymentRequest) => {
+    setIsProcessingPaymentId(req.id);
+    try {
+      const updatedTenant = await approvePaymentRequest(req);
+      setPaymentRequests((prev) =>
+        prev.map((p) => (p.id === req.id ? { ...p, status: 'approved', processedAt: new Date().toISOString() } : p))
+      );
+      refreshTenants();
+      logSecurityEvent({
+        eventType: 'payment_approved',
+        severity: 'info',
+        actorEmail: 'voltcheck@admin.com',
+        actorRole: 'owner',
+        targetId: req.tenantId,
+        summary: `ACC pembayaran ${req.companyName} -> Paket ${req.requestedTierName} (${req.durationMonths} Bln).`,
+      });
+      showToast(
+        `Pembayaran ${req.companyName} di-ACC! Paket ${req.requestedTierName} (${req.durationMonths} Bln) langsung aktif.${
+          updatedTenant ? '' : ''
+        }`
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal memproses ACC pembayaran.');
+    } finally {
+      setIsProcessingPaymentId(null);
+    }
+  };
+
+  const handleConfirmRejectPayment = async () => {
+    if (!rejectingRequest) return;
+    setIsProcessingPaymentId(rejectingRequest.id);
+    try {
+      const updated = await rejectPaymentRequest(rejectingRequest, rejectReasonInput);
+      setPaymentRequests((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      logSecurityEvent({
+        eventType: 'payment_rejected',
+        severity: 'warning',
+        actorEmail: 'voltcheck@admin.com',
+        actorRole: 'owner',
+        targetId: updated.tenantId,
+        summary: `Pengajuan pembayaran ${updated.companyName} ditolak (${updated.rejectionReason || '-'}).`,
+      });
+      setRejectingRequest(null);
+      setRejectReasonInput('');
+      showToast(`Pengajuan pembayaran ${updated.companyName} telah ditolak.`);
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal menolak pengajuan.');
+    } finally {
+      setIsProcessingPaymentId(null);
+    }
+  };
 
   // Metrics calculation
   const metrics = useMemo(() => {
@@ -247,6 +434,14 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
     setTenantToDelete(null);
     setConfirmDeleteId(null);
     setIsFormOpen(false);
+    logSecurityEvent({
+      eventType: 'tenant_deleted',
+      severity: 'critical',
+      actorEmail: 'voltcheck@admin.com',
+      actorRole: 'owner',
+      targetId: tenantId,
+      summary: `Admin menghapus permanen akun customer "${companyName}".`,
+    });
     showToast(`Akun customer "${companyName}" berhasil dihapus secara permanen.`);
   };
 
@@ -275,7 +470,31 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
     window.open(`https://wa.me/${phoneFormatted}?text=${message}`, '_blank');
   };
 
-  const handleSaveTenantForm = (tenantData: RentalTenant) => {
+  const handleMigrateLegacyPasswords = async () => {
+    setIsMigratingPasswords(true);
+    try {
+      const { migratedCount } = await migrateLegacyTenantPasswords();
+      refreshTenants();
+      logSecurityEvent({
+        eventType: 'password_migration',
+        severity: 'info',
+        actorEmail: 'voltcheck@admin.com',
+        actorRole: 'owner',
+        summary: `Migrasi enkripsi SHA-256 selesai untuk ${migratedCount} akun customer legacy.`,
+      });
+      showToast(
+        migratedCount > 0
+          ? `${migratedCount} akun berhasil ditingkatkan ke enkripsi SHA-256!`
+          : 'Seluruh akun sudah menggunakan enkripsi SHA-256.'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal melakukan migrasi enkripsi sandi.');
+    } finally {
+      setIsMigratingPasswords(false);
+    }
+  };
+
+  const handleSaveTenantForm = async (tenantData: RentalTenant) => {
     if (!tenantData.companyName.trim()) {
       setFormError('Nama perusahaan / vendor wajib diisi.');
       return;
@@ -284,25 +503,64 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
       setFormError('Alamat email login wajib diisi dengan format valid (@).');
       return;
     }
+
     const cleanPassword = (tenantData.password || '').trim();
-    if (!cleanPassword || cleanPassword.length < 6) {
+    const alreadyHasHash = Boolean(tenantData.passwordHash && tenantData.passwordSalt);
+
+    // Require password >= 6 chars if creating new tenant OR explicitly changing password
+    if (!alreadyHasHash && (!cleanPassword || cleanPassword.length < 6)) {
       setFormError('Kata sandi wajib diisi minimal 6 karakter.');
       return;
     }
+    if (cleanPassword && cleanPassword.length < 6) {
+      setFormError('Kata sandi baru minimal harus 6 karakter.');
+      return;
+    }
 
-    const payload: RentalTenant = {
+    let securedPayload: RentalTenant = {
       ...tenantData,
       companyName: tenantData.companyName.trim(),
       email: tenantData.email.toLowerCase().trim(),
-      password: cleanPassword,
     };
 
-    saveRentalTenant(payload);
+    if (cleanPassword) {
+      const creds = await createPasswordCredentials(cleanPassword);
+      securedPayload = stripPlaintextPassword({
+        ...securedPayload,
+        ...creds,
+      }) as RentalTenant;
+
+      setLastIssuedCredential({
+        companyName: securedPayload.companyName,
+        picName: securedPayload.picName || 'Customer',
+        phone: securedPayload.phone || '',
+        email: securedPayload.email,
+        password: cleanPassword,
+        tierName: securedPayload.tierName,
+      });
+    } else {
+      securedPayload = stripPlaintextPassword(securedPayload) as RentalTenant;
+    }
+
+    const isNewTenant = !tenants.some((t) => t.id === securedPayload.id);
+    saveRentalTenant(securedPayload);
     refreshTenants();
+
+    logSecurityEvent({
+      eventType: isNewTenant ? 'tenant_created' : 'password_updated',
+      severity: 'info',
+      actorEmail: 'voltcheck@admin.com',
+      actorRole: 'owner',
+      targetId: securedPayload.id,
+      summary: isNewTenant
+        ? `Customer baru "${securedPayload.companyName}" dibuat dengan sandi terenkripsi SHA-256.`
+        : `Data/kredensial "${securedPayload.companyName}" diperbarui.`,
+    });
+
     setIsFormOpen(false);
     setEditingTenant(null);
     setFormError(null);
-    showToast(`Data customer "${payload.companyName}" dan kredensial login berhasil disimpan!`);
+    showToast(`Data customer "${securedPayload.companyName}" tersimpan aman (SHA-256)!`);
   };
 
   const handleNewTenantClick = () => {
@@ -496,6 +754,23 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab('payments')}
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-2 transition-colors whitespace-nowrap ${
+              activeTab === 'payments'
+                ? 'border-emerald-500 text-emerald-400'
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            <CreditCard className="w-4 h-4" />
+            Konfirmasi Pembayaran
+            {pendingPaymentsCount > 0 && (
+              <span className="px-1.5 py-0.2 bg-amber-500 text-slate-950 rounded-full text-[10px] font-black">
+                {pendingPaymentsCount}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('reports')}
             className={`pb-2.5 px-3 border-b-2 flex items-center gap-2 transition-colors whitespace-nowrap ${
               activeTab === 'reports'
@@ -530,7 +805,100 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
             <DollarSign className="w-4 h-4" />
             Generator Invoice Sewa WA
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('settings')}
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-2 transition-colors whitespace-nowrap ${
+              activeTab === 'settings'
+                ? 'border-emerald-500 text-emerald-400'
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            <Settings className="w-4 h-4" />
+            Pengaturan WA & Rekening Penjual
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('security')}
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-2 transition-colors whitespace-nowrap ${
+              activeTab === 'security'
+                ? 'border-emerald-500 text-emerald-400'
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4" />
+            Keamanan & Audit DB
+          </button>
         </div>
+
+        {/* One-Time Credential Share Banner after creating/resetting a password */}
+        {lastIssuedCredential && (
+          <div className="bg-emerald-950/70 border border-emerald-500/50 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+            <div className="space-y-1">
+              <div className="font-bold text-emerald-300 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4" />
+                Kredensial Baru Tersimpan Aman (SHA-256) — Siap Dikirim ke {lastIssuedCredential.companyName}
+              </div>
+              <div className="text-slate-300 font-mono">
+                Email: <strong className="text-white">{lastIssuedCredential.email}</strong> • Sandi Sementara:{' '}
+                <strong className="text-amber-300 select-all">{lastIssuedCredential.password}</strong>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Demi keamanan, sandi di atas tidak disimpan dalam bentuk teks terbuka di database cloud. Salin atau kirim sekarang sebelum menutup banner.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  const text =
+                    `Halo Bapak/Ibu ${lastIssuedCredential.picName} (${lastIssuedCredential.companyName}),\n\n` +
+                    `Berikut kredensial login aplikasi VoltCheck Commissioning Test Anda:\n` +
+                    `• Email Login: ${lastIssuedCredential.email}\n` +
+                    `• Kata Sandi: ${lastIssuedCredential.password}\n` +
+                    `• Paket Sewa: ${lastIssuedCredential.tierName}\n` +
+                    `• Link Portal: ${window.location.origin}\n\n` +
+                    `Terima kasih!\nTim VoltCheck`;
+                  navigator.clipboard.writeText(text);
+                  showToast('Kredensial lengkap berhasil disalin!');
+                }}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-lg flex items-center gap-1.5 cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5 text-emerald-400" />
+                Salin
+              </button>
+              {lastIssuedCredential.phone && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const waPhone = formatWhatsappNumber(lastIssuedCredential.phone);
+                    const text =
+                      `Halo Bapak/Ibu ${lastIssuedCredential.picName} (${lastIssuedCredential.companyName}),\n\n` +
+                      `Berikut kredensial login aplikasi VoltCheck Commissioning Test Anda:\n` +
+                      `• Email Login: ${lastIssuedCredential.email}\n` +
+                      `• Kata Sandi: ${lastIssuedCredential.password}\n` +
+                      `• Paket Sewa: ${lastIssuedCredential.tierName}\n` +
+                      `• Link Portal: ${window.location.origin}\n\n` +
+                      `Terima kasih!\nTim VoltCheck`;
+                    window.open(`https://wa.me/${waPhone}?text=${encodeURIComponent(text)}`, '_blank');
+                  }}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  Kirim WA
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setLastIssuedCredential(null)}
+                className="p-1.5 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                title="Tutup"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Tab 1: Tenants List */}
         {activeTab === 'tenants' && (
@@ -642,21 +1010,25 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                                       Email: <span className="text-slate-200 font-semibold">{t.email}</span>
                                     </span>
                                     <span className="text-slate-600">|</span>
-                                    <span className="text-slate-400 flex items-center gap-1">
-                                      Sandi:
-                                      <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-emerald-400 font-bold select-all">
-                                        {t.password || 'password123'}
+                                    {t.passwordHash && t.passwordSalt ? (
+                                      <span className="px-1.5 py-0.5 rounded bg-emerald-950/70 border border-emerald-700/50 text-emerald-300 font-semibold flex items-center gap-1">
+                                        <Lock className="w-2.5 h-2.5" />
+                                        Terenkripsi SHA-256
                                       </span>
-                                    </span>
+                                    ) : (
+                                      <span className="px-1.5 py-0.5 rounded bg-amber-950/70 border border-amber-700/50 text-amber-300 font-semibold">
+                                        Perlu Enkripsi
+                                      </span>
+                                    )}
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        const text = `Email: ${t.email}\nSandi: ${t.password || 'password123'}\nPortal: ${window.location.origin}`;
+                                        const text = `Email: ${t.email}\nPortal: ${window.location.origin}`;
                                         navigator.clipboard.writeText(text);
-                                        showToast(`Kredensial login ${t.shortCode} berhasil disalin!`);
+                                        showToast(`Email login ${t.shortCode} disalin! Gunakan Edit untuk reset sandi baru.`);
                                       }}
                                       className="p-1 hover:text-emerald-400 text-slate-400 rounded transition-colors"
-                                      title="Salin Email & Sandi"
+                                      title="Salin Email Login"
                                     >
                                       <Copy className="w-3 h-3" />
                                     </button>
@@ -844,25 +1216,20 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                                     <MessageSquare className="w-3.5 h-3.5" />
                                   </button>
 
-                                  {/* Kirim Kredensial WA */}
+                                  {/* Reset Sandi / Edit Kredensial */}
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      const cleanPhone = t.phone.replace(/[^0-9]/g, '');
-                                      const phoneFormatted = cleanPhone.startsWith('0') ? '62' + cleanPhone.slice(1) : cleanPhone;
-                                      const msg = encodeURIComponent(
-                                        `Halo Bapak/Ibu ${t.picName} (${t.companyName}),\n\n` +
-                                          `Berikut kredensial login aplikasi VoltCheck Commissioning Test Anda:\n` +
-                                          `• Email Login: ${t.email}\n` +
-                                          `• Kata Sandi: ${t.password || 'password123'}\n` +
-                                          `• Paket: ${t.tierName}\n` +
-                                          `• Link Portal: ${window.location.origin}\n\n` +
-                                          `Silakan masuk menggunakan email dan kata sandi di atas. Terima kasih!\nTim VoltCheck`
-                                      );
-                                      window.open(`https://wa.me/${phoneFormatted}?text=${msg}`, '_blank');
+                                      setEditingTenant({
+                                        ...t,
+                                        password: '',
+                                      });
+                                      setShowFormPassword(false);
+                                      setFormError(null);
+                                      setIsFormOpen(true);
                                     }}
                                     className="p-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-lg transition-colors"
-                                    title="Kirim Email & Sandi ke WhatsApp Customer"
+                                    title="Atur Ulang / Reset Kata Sandi Customer"
                                   >
                                     <KeyRound className="w-3.5 h-3.5" />
                                   </button>
@@ -873,7 +1240,7 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                                     onClick={() => {
                                       setEditingTenant({
                                         ...t,
-                                        password: t.password || 'password123',
+                                        password: '',
                                       });
                                       setShowFormPassword(false);
                                       setFormError(null);
@@ -1218,9 +1585,11 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                 `----------------------------------------\n` +
                 `*TOTAL: Rp ${total.toLocaleString('id-ID')}*\n\n` +
                 `Pembayaran dapat ditransfer ke:\n` +
-                `Bank BCA: 123-456-7890 a/n PT V-Green Sistem Mandiri\n` +
-                `Bank Mandiri: 987-00-1234567-8 a/n PT V-Green Sistem Mandiri\n\n` +
-                `Terima kasih!\nPengelola V-Green Commissioning Platform`;
+                `${sellerSettings.bankPrimaryName || 'Bank'}: ${sellerSettings.bankPrimaryAccount || '-'} a/n ${sellerSettings.bankPrimaryHolder || '-'}\n` +
+                (sellerSettings.bankSecondaryAccount
+                  ? `${sellerSettings.bankSecondaryName || 'Bank 2'}: ${sellerSettings.bankSecondaryAccount} a/n ${sellerSettings.bankSecondaryHolder || '-'}\n`
+                  : '') +
+                `\nTerima kasih!\n${sellerSettings.businessName || 'Pengelola VoltCheck Platform'}`;
 
               return (
                 <div>
@@ -1263,6 +1632,527 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
             })()}
           </div>
         )}
+
+        {/* Tab 5: Konfirmasi Pembayaran & Bukti Transfer */}
+        {activeTab === 'payments' && (
+          <div className="space-y-4">
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                  <CreditCard className="w-4 h-4 text-emerald-400" />
+                  Verifikasi Bukti Transfer & ACC Paket Customer
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Periksa bukti transfer dari penyewa dan klik &quot;ACC &amp; Aktifkan&quot; untuk membuka kuota dan fitur paket secara otomatis.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('settings')}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <Settings className="w-3.5 h-3.5 text-emerald-400" />
+                Atur Rekening &amp; WA Admin
+              </button>
+            </div>
+
+            {paymentRequests.length === 0 ? (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center text-slate-400">
+                <CreditCard className="w-12 h-12 mx-auto text-slate-600 mb-3" />
+                <h4 className="font-bold text-white text-base">Belum Ada Pengajuan Pembayaran</h4>
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                  Saat customer mengunggah bukti transfer untuk upgrade atau perpanjang paket di portal mereka, data pengajuan akan muncul di sini secara real-time.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {paymentRequests.map((req) => (
+                  <div
+                    key={req.id}
+                    className={`bg-slate-900 border rounded-2xl p-4 flex flex-col justify-between gap-4 shadow-lg ${
+                      req.status === 'pending'
+                        ? 'border-amber-500/60'
+                        : req.status === 'approved'
+                        ? 'border-emerald-800/70 opacity-90'
+                        : 'border-rose-800/70 opacity-85'
+                    }`}
+                  >
+                    <div className="flex items-start gap-4">
+                      {/* Thumbnail Bukti Transfer */}
+                      <button
+                        type="button"
+                        onClick={() => req.proofImage && setPreviewProofUrl(req.proofImage)}
+                        className="w-24 h-28 rounded-xl bg-slate-950 border border-slate-800 overflow-hidden shrink-0 group relative cursor-pointer"
+                        title="Klik untuk memperbesar bukti transfer"
+                      >
+                        {req.proofImage ? (
+                          <>
+                            <img
+                              src={req.proofImage}
+                              alt={`Bukti ${req.companyName}`}
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                            />
+                            <span className="absolute inset-x-0 bottom-0 bg-slate-950/80 text-[10px] text-white py-0.5 font-bold">
+                              Perbesar
+                            </span>
+                          </>
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-[10px] text-slate-500 p-2 text-center">
+                            Tanpa Foto
+                          </div>
+                        )}
+                      </button>
+
+                      {/* Info */}
+                      <div className="flex-1 min-w-0 text-xs space-y-1">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-black text-white text-sm truncate">{req.companyName}</span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                              req.status === 'pending'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                : req.status === 'approved'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                            }`}
+                          >
+                            {req.status === 'pending'
+                              ? 'Menunggu ACC'
+                              : req.status === 'approved'
+                              ? 'Disetujui'
+                              : 'Ditolak'}
+                          </span>
+                        </div>
+
+                        <div className="text-slate-400">
+                          PIC: <span className="text-slate-200">{req.picName}</span> • {req.phone}
+                        </div>
+
+                        <div className="p-2 bg-slate-950 border border-slate-800 rounded-xl space-y-0.5 mt-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-slate-400">Target Paket:</span>
+                            <strong className="text-emerald-300">
+                              {req.requestedTierName} ({req.durationMonths} Bln)
+                            </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-slate-400">Total Transfer:</span>
+                            <strong className="text-white font-mono">
+                              Rp {req.amount.toLocaleString('id-ID')}
+                            </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-slate-400">Pengirim:</span>
+                            <span className="text-slate-200">{req.senderBankOrName || '-'}</span>
+                          </div>
+                        </div>
+
+                        {req.notes && (
+                          <div className="text-[11px] text-slate-400 italic">Catatan: &quot;{req.notes}&quot;</div>
+                        )}
+                        {req.status === 'rejected' && req.rejectionReason && (
+                          <div className="text-[11px] text-rose-300">Alasan tolak: {req.rejectionReason}</div>
+                        )}
+                        <div className="text-[10px] text-slate-500 font-mono">
+                          Diajukan: {req.createdAt?.slice(0, 16).replace('T', ' ')}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const phone = formatWhatsappNumber(req.phone);
+                          const msg = encodeURIComponent(
+                            `Halo Bapak/Ibu ${req.picName} (${req.companyName}), mengenai konfirmasi pembayaran paket ${req.requestedTierName} sebesar Rp ${req.amount.toLocaleString('id-ID')}...`
+                          );
+                          window.open(`https://wa.me/${phone}?text=${msg}`, '_blank');
+                        }}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
+                        Chat WA Customer
+                      </button>
+
+                      {req.status === 'pending' && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={isProcessingPaymentId === req.id}
+                            onClick={() => {
+                              setRejectingRequest(req);
+                              setRejectReasonInput('');
+                            }}
+                            className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                            Tolak
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isProcessingPaymentId === req.id}
+                            onClick={() => handleApprovePayment(req)}
+                            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            {isProcessingPaymentId === req.id ? 'Memproses...' : 'ACC & Aktifkan 1-Klik'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tab 6: Pengaturan Nomor WA & Rekening Resmi Penjual */}
+        {activeTab === 'settings' && (
+          <form onSubmit={handleSaveSellerSettings} className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
+              <div>
+                <h3 className="font-bold text-sm text-white flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-emerald-400" />
+                  Pengaturan Kontak WhatsApp Resmi &amp; Rekening Penjual
+                </h3>
+                <p className="text-slate-400 mt-1">
+                  Nomor WhatsApp dan rekening bank di bawah otomatis digunakan pada seluruh tombol order, upgrade, perpanjangan customer, dan generator invoice.
+                </p>
+              </div>
+              <button
+                type="submit"
+                disabled={isSavingSettings}
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl shadow-md flex items-center gap-2 cursor-pointer"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                {isSavingSettings ? 'Menyimpan...' : 'Simpan Pengaturan ke Cloud'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {/* Identitas & WhatsApp */}
+              <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-3">
+                <h4 className="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">
+                  1. Identitas Penjual &amp; WhatsApp Admin
+                </h4>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Nama Platform / Usaha Penjual</label>
+                  <input
+                    type="text"
+                    required
+                    value={sellerSettings.businessName}
+                    onChange={(e) => setSellerSettings({ ...sellerSettings, businessName: e.target.value })}
+                    placeholder="VoltCheck Commissioning Platform"
+                    className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-white focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    Nomor WhatsApp Resmi Admin (Format 08... atau 628...)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={sellerSettings.adminWhatsapp}
+                    onChange={(e) => setSellerSettings({ ...sellerSettings, adminWhatsapp: e.target.value })}
+                    placeholder="Contoh: 081234567890"
+                    className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-white font-mono focus:border-emerald-500 focus:outline-none"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Link WhatsApp tujuan:{' '}
+                    <span className="text-emerald-400 font-mono">
+                      https://wa.me/{formatWhatsappNumber(sellerSettings.adminWhatsapp)}
+                    </span>
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Catatan Instruksi Pembayaran</label>
+                  <textarea
+                    rows={3}
+                    value={sellerSettings.paymentNotes || ''}
+                    onChange={(e) => setSellerSettings({ ...sellerSettings, paymentNotes: e.target.value })}
+                    placeholder="Contoh: Mohon sertakan nama perusahaan pada berita transfer..."
+                    className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-white focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Rekening Bank & QRIS */}
+              <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-3">
+                <h4 className="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">
+                  2. Rekening Bank &amp; QRIS Penerimaan
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Bank Utama</label>
+                    <input
+                      type="text"
+                      value={sellerSettings.bankPrimaryName}
+                      onChange={(e) => setSellerSettings({ ...sellerSettings, bankPrimaryName: e.target.value })}
+                      placeholder="Bank BCA"
+                      className="w-full p-2 bg-slate-900 border border-slate-800 rounded-xl text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">No. Rekening</label>
+                    <input
+                      type="text"
+                      value={sellerSettings.bankPrimaryAccount}
+                      onChange={(e) => setSellerSettings({ ...sellerSettings, bankPrimaryAccount: e.target.value })}
+                      placeholder="1234567890"
+                      className="w-full p-2 bg-slate-900 border border-slate-800 rounded-xl text-white font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Atas Nama</label>
+                    <input
+                      type="text"
+                      value={sellerSettings.bankPrimaryHolder}
+                      onChange={(e) => setSellerSettings({ ...sellerSettings, bankPrimaryHolder: e.target.value })}
+                      placeholder="Nama Pemilik"
+                      className="w-full p-2 bg-slate-900 border border-slate-800 rounded-xl text-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-900">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Bank Kedua (Opsional)</label>
+                    <input
+                      type="text"
+                      value={sellerSettings.bankSecondaryName || ''}
+                      onChange={(e) => setSellerSettings({ ...sellerSettings, bankSecondaryName: e.target.value })}
+                      placeholder="Bank Mandiri"
+                      className="w-full p-2 bg-slate-900 border border-slate-800 rounded-xl text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">No. Rekening</label>
+                    <input
+                      type="text"
+                      value={sellerSettings.bankSecondaryAccount || ''}
+                      onChange={(e) => setSellerSettings({ ...sellerSettings, bankSecondaryAccount: e.target.value })}
+                      placeholder="Opsional"
+                      className="w-full p-2 bg-slate-900 border border-slate-800 rounded-xl text-white font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Atas Nama</label>
+                    <input
+                      type="text"
+                      value={sellerSettings.bankSecondaryHolder || ''}
+                      onChange={(e) => setSellerSettings({ ...sellerSettings, bankSecondaryHolder: e.target.value })}
+                      placeholder="Opsional"
+                      className="w-full p-2 bg-slate-900 border border-slate-800 rounded-xl text-white"
+                    />
+                  </div>
+                </div>
+
+                {/* Upload QRIS */}
+                <div className="pt-2 border-t border-slate-900">
+                  <label className="block text-slate-300 font-semibold mb-1.5">Gambar QRIS Toko (Opsional)</label>
+                  <div className="flex items-center gap-3">
+                    {sellerSettings.qrisImage && (
+                      <img
+                        src={sellerSettings.qrisImage}
+                        alt="QRIS"
+                        className="w-16 h-16 object-contain bg-white rounded-lg p-1 shrink-0"
+                      />
+                    )}
+                    <label className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 rounded-xl font-bold flex items-center gap-1.5 cursor-pointer">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{isCompressingQris ? 'Memproses...' : sellerSettings.qrisImage ? 'Ganti Gambar QRIS' : 'Unggah Gambar QRIS'}</span>
+                      <input type="file" accept="image/*" onChange={handleQrisUpload} className="hidden" />
+                    </label>
+                    {sellerSettings.qrisImage && (
+                      <button
+                        type="button"
+                        onClick={() => setSellerSettings({ ...sellerSettings, qrisImage: '' })}
+                        className="px-3 py-2 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 rounded-xl font-bold cursor-pointer"
+                      >
+                        Hapus QRIS
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </form>
+        )}
+
+        {/* Tab 7: Keamanan Data, Enkripsi & Audit Database */}
+        {activeTab === 'security' && (() => {
+          const hashedCount = tenants.filter((t) => Boolean(t.passwordHash && t.passwordSalt)).length;
+          const legacyCount = tenants.length - hashedCount;
+          const filteredLogs = securityLogs.filter((l) =>
+            securitySeverityFilter === 'all' ? true : l.severity === securitySeverityFilter
+          );
+
+          return (
+            <div className="space-y-5 text-xs">
+              {/* Security Controls Status Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 font-semibold">Enkripsi Sandi (SHA-256)</span>
+                    <Lock className={`w-4 h-4 ${legacyCount === 0 ? 'text-emerald-400' : 'text-amber-400'}`} />
+                  </div>
+                  <div className="text-xl font-black text-white">
+                    {hashedCount} / {tenants.length} Akun
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    {legacyCount === 0
+                      ? 'Seluruh kredensial sudah terenkripsi & bebas teks terbuka di Firestore.'
+                      : `${legacyCount} akun legacy masih belum dimigrasi ke hash SHA-256.`}
+                  </p>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 font-semibold">Anti-Brute-Force & Backdoor</span>
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  </div>
+                  <div className="text-xl font-black text-emerald-400">Aktif</div>
+                  <p className="text-[11px] text-slate-400">
+                    Kunci otomatis 60 detik setelah 5x salah sandi. Seluruh sandi bypass dihapus.
+                  </p>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 font-semibold">Isolasi Data Multi-Tenant</span>
+                    <Database className="w-4 h-4 text-blue-400" />
+                  </div>
+                  <div className="text-xl font-black text-blue-400">Terkunci</div>
+                  <p className="text-[11px] text-slate-400">
+                    Query Firestore dibatasi per tenantId & token terpakai dijaga tidak dapat direfund via rules.
+                  </p>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 font-semibold">Audit Trail Database</span>
+                    <History className="w-4 h-4 text-purple-400" />
+                  </div>
+                  <div className="text-xl font-black text-white">{securityLogs.length} Log</div>
+                  <p className="text-[11px] text-slate-400">
+                    Koleksi /securityLogs bersifat append-only (tidak dapat diubah atau dihapus).
+                  </p>
+                </div>
+              </div>
+
+              {/* Legacy Migration Banner if any unhashed tenants exist */}
+              {legacyCount > 0 && (
+                <div className="bg-amber-950/60 border border-amber-500/60 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold text-white text-sm">
+                        Ditemukan {legacyCount} Akun Customer dengan Sandi Legacy
+                      </div>
+                      <p className="text-slate-300 mt-0.5">
+                        Enkripsikan seluruh akun tersebut menjadi hash SHA-256 + salt acak agar tidak ada kata sandi teks terbuka di penyimpanan lokal maupun cloud.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isMigratingPasswords}
+                    onClick={handleMigrateLegacyPasswords}
+                    className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-black rounded-xl shrink-0 cursor-pointer"
+                  >
+                    {isMigratingPasswords ? 'Mengenkripsi...' : 'Enkripsi Semua Akun Sekarang'}
+                  </button>
+                </div>
+              )}
+
+              {/* Immutable Security Audit Log Table */}
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+                <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-sm text-white flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      Log Aktivitas Keamanan &amp; Audit Database (Real-Time)
+                    </h3>
+                    <p className="text-slate-400 text-[11px] mt-0.5">
+                      Mencatat percobaan login gagal, pemblokiran brute-force, perubahan rekening penjual, ACC pembayaran, dan penghapusan data.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {(['all', 'critical', 'warning', 'info'] as const).map((sev) => (
+                      <button
+                        key={sev}
+                        type="button"
+                        onClick={() => setSecuritySeverityFilter(sev)}
+                        className={`px-3 py-1.5 rounded-lg font-bold capitalize transition-colors cursor-pointer ${
+                          securitySeverityFilter === sev
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                        }`}
+                      >
+                        {sev === 'all' ? 'Semua' : sev === 'critical' ? 'Kritis' : sev === 'warning' ? 'Peringatan' : 'Info'}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        getSecurityLogsFromFirestore(60).then(setSecurityLogs).catch(() => {});
+                        showToast('Log audit keamanan disegarkan dari Cloud Firestore.');
+                      }}
+                      className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg cursor-pointer"
+                      title="Muat ulang dari Cloud"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {filteredLogs.length === 0 ? (
+                  <div className="p-8 text-center text-slate-500">
+                    Belum ada catatan log untuk filter ini.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-800/70 max-h-[460px] overflow-y-auto">
+                    {filteredLogs.map((log) => (
+                      <div key={log.id} className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-slate-800/30">
+                        <div className="flex items-start gap-2.5">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-black uppercase shrink-0 mt-0.5 ${
+                              log.severity === 'critical'
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : log.severity === 'warning'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                            }`}
+                          >
+                            {log.severity}
+                          </span>
+                          <div>
+                            <div className="text-slate-100 font-semibold">{log.summary}</div>
+                            <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                              Aktor: {log.actorEmail} ({log.actorRole}) • Event: {log.eventType}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-slate-500 font-mono shrink-0">
+                          {new Date(log.createdAt).toLocaleString('id-ID')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </main>
 
       {/* Add / Edit Tenant Modal */}
@@ -1368,7 +2258,8 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <label className="font-semibold text-slate-300 text-xs">
-                        Set Kata Sandi <span className="text-rose-400">*</span>
+                        {editingTenant.passwordHash ? 'Reset Kata Sandi (Opsional)' : 'Set Kata Sandi'}{' '}
+                        {!editingTenant.passwordHash && <span className="text-rose-400">*</span>}
                       </label>
                       <button
                         type="button"
@@ -1388,10 +2279,14 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
                     <div className="relative">
                       <input
                         type={showFormPassword ? 'text' : 'password'}
-                        required
+                        required={!editingTenant.passwordHash}
                         value={editingTenant.password || ''}
                         onChange={(e) => setEditingTenant({ ...editingTenant, password: e.target.value })}
-                        placeholder="Minimal 6 karakter..."
+                        placeholder={
+                          editingTenant.passwordHash
+                            ? 'Kosongkan jika tidak ganti sandi (terenkripsi)...'
+                            : 'Minimal 6 karakter...'
+                        }
                         className="w-full pl-3 pr-10 py-2.5 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono text-xs focus:border-emerald-500 focus:outline-none"
                       />
                       <button
@@ -1688,6 +2583,77 @@ export const OwnerDashboardPage: React.FC<OwnerDashboardPageProps> = ({
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 Ya, Hapus Akun
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fullscreen Proof Image Preview Modal */}
+      {previewProofUrl && (
+        <div
+          className="fixed inset-0 z-[99999] bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4"
+          onClick={() => setPreviewProofUrl(null)}
+        >
+          <div className="relative max-w-2xl w-full bg-slate-900 border border-slate-700 rounded-2xl p-3 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-2 px-1">
+              <span className="text-xs font-bold text-white">Pratinjau Bukti Transfer Customer</span>
+              <button
+                type="button"
+                onClick={() => setPreviewProofUrl(null)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <img src={previewProofUrl} alt="Bukti Transfer Full" className="w-full max-h-[78vh] object-contain rounded-xl bg-black" />
+          </div>
+        </div>
+      )}
+
+      {/* Reject Payment Reason Modal */}
+      {rejectingRequest && (
+        <div className="fixed inset-0 z-[99999] bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 w-full max-w-md rounded-2xl p-5 shadow-2xl space-y-4 text-xs">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-white text-sm">Tolak Bukti Pembayaran</h3>
+              <button
+                type="button"
+                onClick={() => setRejectingRequest(null)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-slate-300">
+              Customer: <strong>{rejectingRequest.companyName}</strong> ({rejectingRequest.requestedTierName} • Rp{' '}
+              {rejectingRequest.amount.toLocaleString('id-ID')})
+            </p>
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1">Alasan Penolakan (ditampilkan ke customer)</label>
+              <textarea
+                rows={3}
+                value={rejectReasonInput}
+                onChange={(e) => setRejectReasonInput(e.target.value)}
+                placeholder="Contoh: Dana belum masuk ke rekening BCA atau nominal transfer kurang..."
+                className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white focus:border-rose-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRejectingRequest(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRejectPayment}
+                disabled={isProcessingPaymentId === rejectingRequest.id}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold cursor-pointer"
+              >
+                Konfirmasi Tolak
               </button>
             </div>
           </div>

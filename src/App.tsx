@@ -56,6 +56,14 @@ import {
   deleteReportFromFirestore,
   subscribeToReports,
 } from './firebase/reportService';
+import { logSecurityEvent } from './firebase/securityLogService';
+import { FieldTestingPanel } from './components/FieldTestingPanel';
+import {
+  getOfflineSyncQueue,
+  enqueueOfflineReport,
+  removeFromOfflineQueue,
+  flushOfflineReportQueue,
+} from './utils/offlineSyncQueue';
 import {
   FileText,
   BatteryCharging,
@@ -296,11 +304,48 @@ export default function App() {
     setCurrentView('dashboard');
   };
 
-  // Database Cloud (Firestore) State
+  // Database Cloud (Firestore) & Offline Field Queue State
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [isDatabaseModalOpen, setIsDatabaseModalOpen] = useState<boolean>(false);
   const [dbSyncStatus, setDbSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [offlineQueueCount, setOfflineQueueCount] = useState<number>(() => getOfflineSyncQueue().length);
+  const [isFlushingQueue, setIsFlushingQueue] = useState<boolean>(false);
+
+  const handleFlushOfflineQueue = async () => {
+    if (isFlushingQueue) return;
+    setIsFlushingQueue(true);
+    try {
+      const { remainingCount } = await flushOfflineReportQueue(reports, currentRentalTenant?.id);
+      setOfflineQueueCount(remainingCount);
+      if (remainingCount === 0) {
+        setLastSyncTime(new Date().toISOString());
+        setDbSyncStatus('synced');
+      }
+    } finally {
+      setIsFlushingQueue(false);
+    }
+  };
+
+  // Monitor browser online/offline transitions for field surveyors in zero-signal areas
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      handleFlushOfflineQueue();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [reports.length, currentRentalTenant?.id]);
 
   // Subscribe to Firebase Auth
   useEffect(() => {
@@ -310,13 +355,20 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Sync with Firestore Cloud Database on boot and listen to real-time updates
+  // Sync with Firestore Cloud Database ONLY when user session is active, and isolate tenant queries
   useEffect(() => {
+    if (!authSession) {
+      setDbSyncStatus('idle');
+      return;
+    }
+
     let isMounted = true;
+    const scopedTenantId = authSession.role === 'tenant' ? authSession.tenantId : undefined;
+
     const initCloudData = async () => {
       setDbSyncStatus('syncing');
       try {
-        const cloudReports = await getAllReportsFromFirestore();
+        const cloudReports = await getAllReportsFromFirestore(scopedTenantId);
         if (!isMounted) return;
 
         const deletedIds = getDeletedReportIds();
@@ -326,9 +378,9 @@ export default function App() {
             const merged = new Map<string, CommissioningReport>();
             validCloud.forEach((r) => merged.set(r.id, r));
             prevLocal.forEach((r) => {
-              if (!merged.has(r.id) && !deletedIds.includes(r.id)) {
+              const belongsToScope = !scopedTenantId || r.tenantId === scopedTenantId;
+              if (!merged.has(r.id) && !deletedIds.includes(r.id) && belongsToScope) {
                 merged.set(r.id, r);
-                // Upload local report to Firestore so cloud has it
                 saveReportToFirestore(r, currentRentalTenant?.id).catch(() => {});
               }
             });
@@ -337,8 +389,9 @@ export default function App() {
           setLastSyncTime(new Date().toISOString());
           setDbSyncStatus('synced');
         } else {
-          // Cloud empty: upload local reports to cloud
-          const validLocal = reports.filter((r) => !deletedIds.includes(r.id));
+          const validLocal = reports.filter(
+            (r) => !deletedIds.includes(r.id) && (!scopedTenantId || r.tenantId === scopedTenantId)
+          );
           for (const r of validLocal) {
             await saveReportToFirestore(r, currentRentalTenant?.id);
           }
@@ -346,7 +399,7 @@ export default function App() {
           setDbSyncStatus('synced');
         }
 
-        // Always sync rental tenants from Firestore Cloud Database
+        // Sync rental tenants from Firestore Cloud Database
         try {
           const cloudTenants = await getAllTenantsFromFirestore();
           if (cloudTenants && cloudTenants.length > 0) {
@@ -354,14 +407,12 @@ export default function App() {
             const deletedTenantIds = getDeletedTenantIds();
             const tenantMap = new Map<string, RentalTenant>();
 
-            // Seed with local tenants not deleted
             localTenants.forEach((t) => {
               if (!deletedTenantIds.includes(t.id)) {
                 tenantMap.set(t.id, t);
               }
             });
 
-            // Merge cloud tenants (cloud takes priority for freshest admin updates)
             cloudTenants.forEach((ct) => {
               if (!deletedTenantIds.includes(ct.id)) {
                 tenantMap.set(ct.id, ct);
@@ -382,7 +433,7 @@ export default function App() {
 
     initCloudData();
 
-    // Attach real-time listener to Firestore reports
+    // Attach real-time listener to Firestore reports (isolated by tenantId for tenants)
     const unsubReports = subscribeToReports(
       (updatedCloudReports) => {
         if (!isMounted) return;
@@ -398,7 +449,8 @@ export default function App() {
       },
       (err) => {
         console.warn('Real-time listener note:', err);
-      }
+      },
+      scopedTenantId
     );
 
     // Attach real-time listener to Firestore tenants
@@ -436,7 +488,7 @@ export default function App() {
       unsubReports();
       unsubTenants();
     };
-  }, []);
+  }, [authSession?.role, authSession?.tenantId]);
 
   // Modals
   const [liveCameraItem, setLiveCameraItem] = useState<{
@@ -460,7 +512,28 @@ export default function App() {
     }
   }, [reports, currentId]);
 
-  // Update current report helper and automatically persist to Firestore Cloud Database
+  // Helper to persist report to Firestore or queue automatically when offline
+  const persistReportSafely = (rep: CommissioningReport, tenantId?: string) => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      const next = enqueueOfflineReport(rep.id, tenantId);
+      setOfflineQueueCount(next.length);
+      return;
+    }
+    saveReportToFirestore(rep, tenantId)
+      .then(() => {
+        const next = removeFromOfflineQueue(rep.id);
+        setOfflineQueueCount(next.length);
+        setLastSyncTime(new Date().toISOString());
+        setDbSyncStatus('synced');
+      })
+      .catch((err) => {
+        console.warn('Firestore auto-save queued offline:', err);
+        const next = enqueueOfflineReport(rep.id, tenantId);
+        setOfflineQueueCount(next.length);
+      });
+  };
+
+  // Update current report helper and automatically persist to Firestore Cloud Database (or offline queue)
   const updateCurrentReport = (updater: (prev: CommissioningReport) => CommissioningReport) => {
     setReports((prev) =>
       prev.map((r) => {
@@ -470,10 +543,7 @@ export default function App() {
             ...updated,
             updatedAt: new Date().toISOString(),
           };
-          // Persist to Cloud Database Firestore
-          saveReportToFirestore(withTimestamp, currentRentalTenant?.id).catch((err) =>
-            console.warn('Firestore auto-save notice:', err)
-          );
+          persistReportSafely(withTimestamp, currentRentalTenant?.id);
           return withTimestamp;
         }
         return r;
@@ -816,6 +886,15 @@ export default function App() {
       console.warn('Firestore report deletion notice:', err)
     );
 
+    logSecurityEvent({
+      eventType: 'report_deleted',
+      severity: 'warning',
+      actorEmail: authSession?.userEmail || 'anonymous',
+      actorRole: authSession?.role || 'system',
+      targetId: id,
+      summary: `Laporan commissioning (${id}) dihapus oleh ${authSession?.userEmail || 'pengguna'}.`,
+    });
+
     // 4. Update state and storage immediately
     setReports((prev) => {
       const remaining = prev.filter((r) => r.id !== id);
@@ -1007,6 +1086,10 @@ export default function App() {
         activeTenantName={currentRentalTenant?.companyName || activeTenant?.name}
         onOpenDatabaseModal={authSession.role === 'owner' ? () => setIsDatabaseModalOpen(true) : undefined}
         dbSyncStatus={dbSyncStatus}
+        isOnline={isOnline}
+        offlineQueueCount={offlineQueueCount}
+        isFlushingQueue={isFlushingQueue}
+        onFlushOfflineQueue={handleFlushOfflineQueue}
         onOpenLogin={() => setIsLoginModalOpen(true)}
         onOpenOwnerDashboard={() => {
           if (authSession.role === 'owner') {
@@ -1233,6 +1316,17 @@ export default function App() {
             <div className="space-y-6">
               {/* Live Electrical Pass/Fail Evaluation Banner */}
               <ElectricalAuditBanner report={currentReport} />
+
+              {/* Extended 3-Phase, RCCB/ELCB, Megger, Thermal, Calibration & K3 Field Panel */}
+              <FieldTestingPanel
+                report={currentReport}
+                onChange={(updatedFieldTesting) =>
+                  updateCurrentReport((prev) => ({
+                    ...prev,
+                    fieldTesting: updatedFieldTesting,
+                  }))
+                }
+              />
 
               <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-100 pb-4 mb-6">

@@ -24,6 +24,12 @@ import {
 } from 'lucide-react';
 import { exportReportPhotosAsZip, exportReportSummaryCSV } from '../utils/exportUtils';
 import { evaluateGrounding } from '../utils/complianceUtils';
+import {
+  calculateCommissioningScore,
+  calculatePhaseUnbalance,
+  computeReportVerificationCode,
+  evaluateElectricalStatus,
+} from '../utils/electricalValidation';
 
 interface PrintReportViewProps {
   report: CommissioningReport;
@@ -39,6 +45,7 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
   tenantName,
 }) => {
   const [gmapsQrCode, setGmapsQrCode] = useState<string>('');
+  const [bastQrCode, setBastQrCode] = useState<string>('');
   const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
   const [zipProgress, setZipProgress] = useState<string>('');
   const [viewMode, setViewMode] = useState<'mobile' | 'a4'>(() => {
@@ -60,6 +67,35 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
     approval,
   } = report;
 
+  const readiness = calculateCommissioningScore(report);
+  const verdict = evaluateElectricalStatus(report);
+  const sealCode = computeReportVerificationCode(report);
+  const ft = report.fieldTesting;
+  const phaseBalance = ft
+    ? calculatePhaseUnbalance(
+        acPanelTesting.voltageRN.measurementValue,
+        ft.voltageSN,
+        ft.voltageTN
+      )
+    : null;
+  const hasFieldTestingData = Boolean(
+    ft &&
+      (ft.voltageSN ||
+        ft.voltageTN ||
+        ft.voltageRS ||
+        ft.voltageST ||
+        ft.voltageRT ||
+        ft.rccbTripTimeMs ||
+        ft.insulationMohm ||
+        ft.panelTempCelsius ||
+        ft.instrumentName ||
+        ft.torqueChecked ||
+        ft.k3LotoApplied ||
+        ft.k3ApdVerified ||
+        ft.k3FireExtAvailable ||
+        ft.fieldNotes)
+  );
+
   // Generate QR code for Google Maps location
   useEffect(() => {
     const targetUrl =
@@ -80,6 +116,38 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
         .catch((err) => console.error('Failed to generate QR code', err));
     }
   }, [generalInfo.gmapsLink, generalInfo.plantCoordinate]);
+
+  // Generate tamper-evident verification QR code for BAST seal
+  useEffect(() => {
+    const payload = [
+      'VOLTCHECK BAST VERIFICATION',
+      `SEAL: ${sealCode}`,
+      `PLANT: ${generalInfo.plantName || '-'}`,
+      `SN: ${generalInfo.snChargerUnit || '-'}`,
+      `DATE: ${generalInfo.commissioningDate || '-'}`,
+      `SCORE: ${readiness.totalScore}% (${readiness.gradeLabel})`,
+      `PUIL: ${verdict.status}`,
+    ].join(' | ');
+
+    QRCode.toDataURL(payload, {
+      width: 120,
+      margin: 1,
+      color: {
+        dark: '#0f172a',
+        light: '#ffffff',
+      },
+    })
+      .then((url) => setBastQrCode(url))
+      .catch((err) => console.error('Failed to generate BAST QR code', err));
+  }, [
+    sealCode,
+    generalInfo.plantName,
+    generalInfo.snChargerUnit,
+    generalInfo.commissioningDate,
+    readiness.totalScore,
+    readiness.gradeLabel,
+    verdict.status,
+  ]);
 
   const handlePrint = () => {
     window.print();
@@ -473,6 +541,80 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
             </div>
 
             <MobilePhotoItem item={acPanelTesting.groundingToAcPanel} onZoom={setLightboxImage} />
+
+            {hasFieldTestingData && ft && (
+              <div className="bg-slate-900 text-white rounded-2xl p-4 shadow-sm border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800">
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                    Uji Lanjutan 3-Fasa, Proteksi & K3
+                  </span>
+                  {phaseBalance?.percent !== null && phaseBalance && (
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                        phaseBalance.status === 'pass'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                          : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                      }`}
+                    >
+                      Unbalance {phaseBalance.percent}%
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block">3-Fasa (S-N / T-N)</span>
+                    <span className="font-mono font-bold text-white">
+                      {ft.voltageSN || '-'} V / {ft.voltageTN || '-'} V
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block">Line-to-Line (R-S/S-T/R-T)</span>
+                    <span className="font-mono font-bold text-white">
+                      {ft.voltageRS || '-'}/{ft.voltageST || '-'}/{ft.voltageRT || '-'} V
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block">Trip RCCB ({ft.rccbRatingMa || '30'} mA)</span>
+                    <span className="font-mono font-bold text-emerald-300">
+                      {ft.rccbTripTimeMs ? `${ft.rccbTripTimeMs} ms` : '-'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block">Megger & Thermal</span>
+                    <span className="font-mono font-bold text-white">
+                      {ft.insulationMohm || '-'} MΩ • {ft.panelTempCelsius || '-'} °C
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
+                  <span className={`px-2 py-0.5 rounded ${ft.torqueChecked ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
+                    {ft.torqueChecked ? '✓' : '•'} Torsi MCB
+                  </span>
+                  <span className={`px-2 py-0.5 rounded ${ft.k3LotoApplied ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
+                    {ft.k3LotoApplied ? '✓' : '•'} LOTO
+                  </span>
+                  <span className={`px-2 py-0.5 rounded ${ft.k3ApdVerified ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
+                    {ft.k3ApdVerified ? '✓' : '•'} APD
+                  </span>
+                  <span className={`px-2 py-0.5 rounded ${ft.k3FireExtAvailable ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
+                    {ft.k3FireExtAvailable ? '✓' : '•'} APAR
+                  </span>
+                </div>
+
+                {(ft.instrumentName || ft.fieldNotes) && (
+                  <div className="pt-2 border-t border-slate-800 text-[10px] text-slate-300 space-y-1">
+                    {ft.instrumentName && (
+                      <div>
+                        Alat Ukur: <strong className="text-white">{ft.instrumentName}</strong> (SN: {ft.instrumentSerial || '-'}, Kal: {ft.instrumentCalDate || '-'})
+                      </div>
+                    )}
+                    {ft.fieldNotes && <div className="text-slate-400 italic">Catatan: {ft.fieldNotes}</div>}
+                  </div>
+                )}
+              </div>
+            )}
           </MobileSection>
 
           {/* Section 6: Cables */}
@@ -545,6 +687,32 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
                   />
                 )}
               </div>
+            </div>
+
+            {/* Digital BAST Readiness & Tamper-Evident Verification Seal */}
+            <div className="mt-3 p-3.5 bg-slate-900 text-white rounded-2xl border border-slate-800 flex items-center justify-between gap-3">
+              <div className="space-y-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400">
+                    Segel Verifikasi Digital BAST
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-[10px] font-bold border border-emerald-500/30">
+                    {sealCode}
+                  </span>
+                </div>
+                <div className="text-xs font-bold">
+                  Skor Kesiapan: <span className="text-emerald-400 font-mono">{readiness.totalScore}%</span>{' '}
+                  <span className="text-slate-400 font-normal">({readiness.gradeLabel})</span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  Verdict PUIL: <strong className="text-white">{verdict.status}</strong> • Foto: {readiness.filledPhotos}/{readiness.totalPhotos}
+                </div>
+              </div>
+              {bastQrCode && (
+                <div className="bg-white p-1.5 rounded-xl shrink-0">
+                  <img src={bastQrCode} alt="QR Verifikasi BAST" className="w-16 h-16 object-contain" />
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1328,6 +1496,54 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
                 </tbody>
               </table>
 
+              {hasFieldTestingData && ft && (
+                <>
+                  <div className="border-b-2 border-black px-2 py-1.5 font-bold text-[10px] bg-slate-100 uppercase tracking-wide">
+                    6.2 Extended 3-Phase, Protection, K3 & Calibration Summary
+                  </div>
+                  <table className="w-full border-collapse text-[9.5px] table-fixed border-b-2 border-black">
+                    <colgroup>
+                      <col style={{ width: '25%' }} />
+                      <col style={{ width: '25%' }} />
+                      <col style={{ width: '25%' }} />
+                      <col style={{ width: '25%' }} />
+                    </colgroup>
+                    <tbody>
+                      <tr className="border-b border-black">
+                        <td className="p-1.5 font-bold border-r border-black bg-slate-50">
+                          3-Phase (S-N / T-N)
+                        </td>
+                        <td className="p-1.5 border-r border-black font-mono">
+                          {ft.voltageSN || '-'} V / {ft.voltageTN || '-'} V
+                          {phaseBalance?.percent !== null && phaseBalance ? ` (Unbal: ${phaseBalance.percent}%)` : ''}
+                        </td>
+                        <td className="p-1.5 font-bold border-r border-black bg-slate-50">
+                          Line-to-Line (R-S/S-T/R-T)
+                        </td>
+                        <td className="p-1.5 font-mono">
+                          {ft.voltageRS || '-'}/{ft.voltageST || '-'}/{ft.voltageRT || '-'} V
+                        </td>
+                      </tr>
+                      <tr className="border-b border-black">
+                        <td className="p-1.5 font-bold border-r border-black bg-slate-50">
+                          RCCB / Megger / Thermal
+                        </td>
+                        <td className="p-1.5 border-r border-black font-mono">
+                          {ft.rccbTripTimeMs ? `${ft.rccbTripTimeMs}ms` : '-'} | {ft.insulationMohm ? `${ft.insulationMohm}MΩ` : '-'} | {ft.panelTempCelsius ? `${ft.panelTempCelsius}°C` : '-'}
+                        </td>
+                        <td className="p-1.5 font-bold border-r border-black bg-slate-50">
+                          Checklist K3 & Kalibrasi
+                        </td>
+                        <td className="p-1.5">
+                          Torsi:{ft.torqueChecked ? 'OK' : '-'} LOTO:{ft.k3LotoApplied ? 'OK' : '-'} APD:{ft.k3ApdVerified ? 'OK' : '-'} APAR:{ft.k3FireExtAvailable ? 'OK' : '-'}
+                          {ft.instrumentName ? ` • ${ft.instrumentName} (${ft.instrumentCalDate || '-'})` : ''}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </>
+              )}
+
               <div className="border-b-2 border-black p-2 font-bold text-xs bg-slate-100">
                 Approval
               </div>
@@ -1441,6 +1657,26 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
                   </tr>
                 </tbody>
               </table>
+
+              {/* Tamper-Evident Digital Verification Seal & Readiness Score */}
+              <div className="border-t-2 border-black px-3 py-2 bg-slate-50/90 flex items-center justify-between gap-4 shrink-0">
+                <div className="flex-1 text-[9.5px] space-y-0.5">
+                  <div className="font-black uppercase tracking-wider text-slate-900">
+                    DIGITAL BAST VERIFICATION SEAL • {sealCode}
+                  </div>
+                  <div className="text-slate-700">
+                    Skor Kesiapan Commissioning: <strong>{readiness.totalScore}% ({readiness.gradeLabel})</strong> • Status PUIL: <strong>{verdict.status}</strong> • Dokumentasi Foto: <strong>{readiness.filledPhotos}/{readiness.totalPhotos}</strong>
+                  </div>
+                  <div className="text-[8.5px] text-slate-500">
+                    Pindai QR di samping untuk verifikasi keaslian parameter stasiun, S/N unit, tanggal commissioning, dan sidik jari laporan.
+                  </div>
+                </div>
+                {bastQrCode && (
+                  <div className="border border-black bg-white p-1 shrink-0">
+                    <img src={bastQrCode} alt="BAST Verification QR" className="w-14 h-14 object-contain" />
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 

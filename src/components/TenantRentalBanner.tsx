@@ -1,6 +1,13 @@
-import React, { useState } from 'react';
-import { RentalTenant, AuthSession } from '../types/rental';
+import React, { useState, useEffect } from 'react';
+import { RentalTenant, AuthSession, SellerSettings } from '../types/rental';
 import { getDaysRemaining } from '../utils/rentalStorage';
+import {
+  getLocalSellerSettings,
+  getSellerSettingsFromFirestore,
+  subscribeToSellerSettings,
+  formatWhatsappNumber,
+} from '../firebase/billingService';
+import { UpgradePaymentModal } from './UpgradePaymentModal';
 import {
   Clock,
   AlertTriangle,
@@ -14,6 +21,7 @@ import {
   LogOut,
   Sparkles,
   Zap,
+  CreditCard,
 } from 'lucide-react';
 
 interface TenantRentalBannerProps {
@@ -30,6 +38,14 @@ export const TenantRentalBanner: React.FC<TenantRentalBannerProps> = ({
   onSwitchToOwner,
 }) => {
   const [showLimitsModal, setShowLimitsModal] = useState(false);
+  const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
+  const [sellerSettings, setSellerSettings] = useState<SellerSettings>(() => getLocalSellerSettings());
+
+  useEffect(() => {
+    getSellerSettingsFromFirestore().then(setSellerSettings).catch(() => {});
+    const unsub = subscribeToSellerSettings(setSellerSettings);
+    return () => unsub();
+  }, []);
 
   // If logged in as Owner, show subtle seller bar
   if (session.role === 'owner') {
@@ -69,16 +85,15 @@ export const TenantRentalBanner: React.FC<TenantRentalBannerProps> = ({
   const isQuotaFull = quotaTotal !== -1 && quotaUsed >= quotaTotal;
 
   const handleContactSellerWA = () => {
-    const cleanPhone = tenant.phone.replace(/[^0-9]/g, '');
-    const phoneFormatted = cleanPhone.startsWith('0') ? '62' + cleanPhone.slice(1) : cleanPhone;
+    const adminWa = formatWhatsappNumber(sellerSettings.adminWhatsapp);
     const message = encodeURIComponent(
-      `Halo Pengelola V-Green System,\n\nSaya ingin konfirmasi perpanjangan sewa / upgrade fitur aplikasi:\n` +
-        `• Perusahaan: ${tenant.companyName}\n` +
+      `Halo ${sellerSettings.businessName || 'Pengelola VoltCheck System'},\n\nSaya ingin konfirmasi perpanjangan sewa / upgrade fitur aplikasi:\n` +
+        `• Perusahaan: ${tenant.companyName} (${tenant.shortCode})\n` +
         `• Paket Sekarang: ${tenant.tierName}\n` +
         `• Sisa Waktu: ${daysLeft} hari\n\n` +
         `Mohon info rekening dan paket perpanjangan. Terima kasih!`
     );
-    window.open(`https://wa.me/6281234567890?text=${message}`, '_blank');
+    window.open(`https://wa.me/${adminWa}?text=${message}`, '_blank');
   };
 
   return (
@@ -146,11 +161,11 @@ export const TenantRentalBanner: React.FC<TenantRentalBannerProps> = ({
 
             <button
               type="button"
-              onClick={handleContactSellerWA}
-              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-sm transition-colors"
+              onClick={() => setIsUpgradeModalOpen(true)}
+              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
             >
-              <MessageSquare className="w-3.5 h-3.5" />
-              Perpanjang / Hubungi Penjual
+              <CreditCard className="w-3.5 h-3.5" />
+              Perpanjang / Upgrade Paket
             </button>
 
             {session.impersonatedByOwner ? (
@@ -297,18 +312,24 @@ export const TenantRentalBanner: React.FC<TenantRentalBannerProps> = ({
                   type="button"
                   onClick={() => {
                     setShowLimitsModal(false);
-                    handleContactSellerWA();
+                    setIsUpgradeModalOpen(true);
                   }}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center gap-1.5 shadow-sm"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center gap-1.5 shadow-sm cursor-pointer"
                 >
-                  <MessageSquare className="w-4 h-4" />
-                  Upgrade Fitur via WhatsApp
+                  <CreditCard className="w-4 h-4" />
+                  Upgrade & Upload Bukti Bayar
                 </button>
               </div>
             </div>
           </div>
         </div>
       )}
+
+      <UpgradePaymentModal
+        isOpen={isUpgradeModalOpen}
+        onClose={() => setIsUpgradeModalOpen(false)}
+        tenant={tenant}
+      />
     </>
   );
 };

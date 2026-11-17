@@ -47,6 +47,10 @@
           "type": "object",
           "description": "General plant metadata, charger SN, billing ID, coordinates, and vendor details"
         },
+        "fieldTesting": {
+          "type": "object",
+          "description": "Extended 3-phase voltage, RCCB/ELCB trip time, Megger insulation, thermal, calibration, and K3 safety checks"
+        },
         "approval": {
           "type": "object",
           "description": "Signatures and verification stamps"
@@ -103,7 +107,7 @@
     },
     "Tenant": {
       "title": "RentalTenant",
-      "description": "Contractor tenant profile and subscription package details",
+      "description": "Contractor tenant profile and subscription package details (plaintext passwords forbidden)",
       "type": "object",
       "properties": {
         "id": {
@@ -116,20 +120,55 @@
           "description": "Registered company name",
           "maxLength": 256
         },
+        "shortCode": {
+          "type": "string",
+          "description": "Tenant short code",
+          "maxLength": 32
+        },
         "email": {
           "type": "string",
           "description": "Registered tenant email address",
           "maxLength": 256
         },
+        "passwordHash": {
+          "type": "string",
+          "description": "Salted SHA-256 hex digest of customer password",
+          "maxLength": 128
+        },
+        "passwordSalt": {
+          "type": "string",
+          "description": "Per-tenant random hex salt",
+          "maxLength": 64
+        },
+        "passwordUpdatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when password hash was last updated",
+          "maxLength": 64
+        },
+        "picName": {
+          "type": "string",
+          "description": "Person in charge name",
+          "maxLength": 128
+        },
+        "phone": {
+          "type": "string",
+          "description": "PIC WhatsApp phone",
+          "maxLength": 32
+        },
         "tier": {
           "type": "string",
           "description": "Subscription tier",
-          "enum": ["starter", "pro", "enterprise"]
+          "enum": ["trial", "starter", "pro", "enterprise", "custom"]
         },
         "status": {
           "type": "string",
           "description": "Rental status",
-          "enum": ["active", "suspended", "expired"]
+          "enum": ["active", "trial", "suspended", "expired"]
+        },
+        "paymentStatus": {
+          "type": "string",
+          "description": "Payment state",
+          "enum": ["paid", "pending", "overdue"]
         },
         "reportsQuota": {
           "type": "number",
@@ -137,7 +176,7 @@
         },
         "reportsUsed": {
           "type": "number",
-          "description": "Reports created this billing period"
+          "description": "Non-refundable consumed report tokens"
         },
         "updatedAt": {
           "type": "string",
@@ -145,6 +184,241 @@
         }
       },
       "required": ["id", "companyName", "email", "tier", "status"]
+    },
+    "SellerSettings": {
+      "title": "SellerSettings",
+      "description": "Platform seller WhatsApp number, bank accounts, and QRIS payment configuration",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Settings identifier (default)",
+          "maxLength": 128
+        },
+        "businessName": {
+          "type": "string",
+          "description": "Seller business display name",
+          "maxLength": 128
+        },
+        "adminWhatsapp": {
+          "type": "string",
+          "description": "Official seller WhatsApp number in 628... format",
+          "maxLength": 32
+        },
+        "bankPrimaryName": {
+          "type": "string",
+          "description": "Primary bank name",
+          "maxLength": 64
+        },
+        "bankPrimaryAccount": {
+          "type": "string",
+          "description": "Primary bank account number",
+          "maxLength": 64
+        },
+        "bankPrimaryHolder": {
+          "type": "string",
+          "description": "Primary bank account holder name",
+          "maxLength": 128
+        },
+        "bankSecondaryName": {
+          "type": "string",
+          "description": "Secondary bank name",
+          "maxLength": 64
+        },
+        "bankSecondaryAccount": {
+          "type": "string",
+          "description": "Secondary bank account number",
+          "maxLength": 64
+        },
+        "bankSecondaryHolder": {
+          "type": "string",
+          "description": "Secondary bank account holder name",
+          "maxLength": 128
+        },
+        "qrisImage": {
+          "type": "string",
+          "description": "Compressed QRIS image data URL",
+          "maxLength": 500000
+        },
+        "paymentNotes": {
+          "type": "string",
+          "description": "Payment instructions shown to customers",
+          "maxLength": 500
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update ISO timestamp"
+        }
+      },
+      "required": ["id", "businessName", "adminWhatsapp"]
+    },
+    "PaymentRequest": {
+      "title": "PaymentRequest",
+      "description": "Customer upgrade, renewal, or activation payment proof submission",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique payment request ID",
+          "maxLength": 128
+        },
+        "tenantId": {
+          "type": "string",
+          "description": "Associated rental tenant ID",
+          "maxLength": 128
+        },
+        "companyName": {
+          "type": "string",
+          "description": "Customer company name",
+          "maxLength": 256
+        },
+        "shortCode": {
+          "type": "string",
+          "description": "Tenant short code",
+          "maxLength": 16
+        },
+        "picName": {
+          "type": "string",
+          "description": "Customer PIC name",
+          "maxLength": 128
+        },
+        "phone": {
+          "type": "string",
+          "description": "Customer WhatsApp number",
+          "maxLength": 32
+        },
+        "email": {
+          "type": "string",
+          "description": "Customer email",
+          "maxLength": 256
+        },
+        "requestType": {
+          "type": "string",
+          "description": "Type of billing request",
+          "enum": ["upgrade", "renewal", "activation"]
+        },
+        "currentTier": {
+          "type": "string",
+          "description": "Current tier before payment",
+          "enum": ["trial", "starter", "pro", "enterprise", "custom"]
+        },
+        "requestedTier": {
+          "type": "string",
+          "description": "Requested target tier",
+          "enum": ["trial", "starter", "pro", "enterprise", "custom"]
+        },
+        "requestedTierName": {
+          "type": "string",
+          "description": "Display name of requested tier",
+          "maxLength": 128
+        },
+        "durationMonths": {
+          "type": "number",
+          "description": "Subscription duration in months"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Total IDR transfer amount"
+        },
+        "senderBankOrName": {
+          "type": "string",
+          "description": "Sender account holder or bank",
+          "maxLength": 128
+        },
+        "proofImage": {
+          "type": "string",
+          "description": "Compressed transfer receipt image data URL",
+          "maxLength": 550000
+        },
+        "notes": {
+          "type": "string",
+          "description": "Customer notes",
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "description": "Approval status",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "rejectionReason": {
+          "type": "string",
+          "description": "Admin rejection note if rejected",
+          "maxLength": 300
+        },
+        "processedAt": {
+          "type": "string",
+          "description": "Approval/rejection timestamp"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation ISO timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update ISO timestamp"
+        }
+      },
+      "required": ["id", "tenantId", "requestedTier", "durationMonths", "amount", "status"]
+    },
+    "SecurityLog": {
+      "title": "SecurityLog",
+      "description": "Append-only security and database audit trail event",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique log identifier",
+          "maxLength": 128
+        },
+        "eventType": {
+          "type": "string",
+          "description": "Categorized security event type",
+          "enum": [
+            "login_success",
+            "login_failed",
+            "rate_limit_blocked",
+            "password_updated",
+            "password_migration",
+            "tenant_created",
+            "tenant_deleted",
+            "payment_approved",
+            "payment_rejected",
+            "settings_updated",
+            "report_deleted"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "description": "Audit severity level",
+          "enum": ["info", "warning", "critical"]
+        },
+        "actorEmail": {
+          "type": "string",
+          "description": "Email or identifier of actor",
+          "maxLength": 256
+        },
+        "actorRole": {
+          "type": "string",
+          "description": "Role context of actor",
+          "enum": ["owner", "tenant", "system", "anonymous"]
+        },
+        "targetId": {
+          "type": "string",
+          "description": "Target tenant, report, or settings document ID",
+          "maxLength": 128
+        },
+        "summary": {
+          "type": "string",
+          "description": "Human-readable audit description",
+          "maxLength": 400
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp when event occurred",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "eventType", "severity", "actorEmail", "actorRole", "summary", "createdAt"]
     }
   },
   "firestore": {
@@ -164,7 +438,25 @@
       "schema": {
         "$ref": "#/entities/Tenant"
       },
-      "description": "Stores rental contractor tenant accounts, quotas, and subscription statuses"
+      "description": "Stores rental contractor tenant accounts, salted SHA-256 credentials, quotas, and subscription statuses"
+    },
+    "/sellerSettings/{settingId}": {
+      "schema": {
+        "$ref": "#/entities/SellerSettings"
+      },
+      "description": "Stores official seller WhatsApp contact, bank accounts, and QRIS details"
+    },
+    "/paymentRequests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/PaymentRequest"
+      },
+      "description": "Stores customer upgrade/renewal transfer proof submissions and admin approvals"
+    },
+    "/securityLogs/{logId}": {
+      "schema": {
+        "$ref": "#/entities/SecurityLog"
+      },
+      "description": "Append-only security and database audit trail events"
     }
   }
 }
